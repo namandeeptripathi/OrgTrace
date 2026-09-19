@@ -66,4 +66,21 @@ from .financial_intelligence import (
     extract_financials_from_pdf,
     extract_official_accounts,
 )
+from .evidence_engine import (
+    EvidenceSelector,
+    ExtractionMethod,
+    ProvenanceClaim,
+    SelectorType,
+    SourceAuthority,
+    ValidationStatus,
+    ValidationVerdict,
+    build_provenance_claim,
+    classify_source_authority,
+    compute_content_hash,
+    explain_authority_rank,
+    is_more_authoritative,
+    validate_claim_evidence,
+    verify_snapshot_match,
+)
+
 

@@ -72,7 +72,32 @@ The Stage 4 financial intelligence engine (`norway_company_agent.financial_intel
 - **Account Types**: Distinguishes standalone legal entity accounts (`SELSKAP`) from consolidated group accounts (`KONSERN`). Standalone `SELSKAP` accounts are prioritized as the primary anchor for exact entity matching.
 - **Accounting Obligation Assessment**: Evaluates statutory obligations (`ALWAYS_ACCOUNTING_OBLIGED_FORMS` such as `AS`, `ASA` vs `THRESHOLD_OR_ACTIVITY_FORMS` such as `ENK`, `ANS`, `DA`), distinguishing companies that have an unfulfilled filing obligation from those legally exempt.
 - **Financial PDF Detection & Extraction**: Discovers official filing copies from `BRREG_ACCOUNT_PDF` (`https://data.brreg.no/regnskapsregisteret/regnskap/aarsregnskap/kopi/{org}/{year}`) and first-party annual report PDFs from company website IR pages. Extracts financial line items from PDF text using exact-entity verification (validating the 9-digit org number in the document to prevent parent/subsidiary conflation).
-- **Evidence Provenance**: Every financial metric is wrapped in `ExtractedField` with explicit `source_url`, `source_type` (`official_regnskapsregisteret`, `official_annual_report_pdf`, `company_website_ir`), and evidence span.
+## Stage 5 — Evidence & Provenance Engine
+
+The Stage 5 evidence & provenance engine (`norway_company_agent.evidence_engine`) provides end-to-end traceability for every claim in OrgTrace, ensuring zero fabricated provenance and strict fail-closed validation:
+- **Claim-Level Evidence**: Every extracted fact is represented as an independently verifiable `ProvenanceClaim[T]` with a deterministic `claim_id`, `field_name`, `value`, `source_url`, `discovered_url`, `source_type`, `source_authority`, `retrieved_at`, `effective_date`, `reporting_date`, `reporting_period`, `content_sha256`, `extraction_method`, `selector`, `evidence_span`, and `confidence`.
+- **7-Tier Source Authority Hierarchy**:
+  1. `GOVERNMENT_REGISTRY` (100): Official BRREG Enhetsregisteret and Regnskapsregisteret endpoints (primary statutory ground truth).
+  2. `OFFICIAL_FILING_COPY` (90): Certified Brønnøysund annual report PDF filings.
+  3. `VERIFIED_FIRST_PARTY` (80): Verified company website content (`/om-oss`, `/investor`, `/karriere`).
+  4. `FIRST_PARTY_STRUCTURED` (75): First-party schema.org / JSON-LD markup on verified company site.
+  5. `REPUTABLE_SECONDARY` (50): Verified news publishers and official partner registers.
+  6. `SEARCH_DISCOVERY` (30): Search candidate discovery; strictly candidate-only, never published as ground truth.
+  7. `UNVERIFIED_THIRD_PARTY` (10): Aggregators (Proff, Purehelp), directories, or parked pages; quarantined or rejected.
+- **Evidence Selectors**: Structured locators identifying the precise location within a source:
+  - `CSS` / `XPATH`: HTML element queries
+  - `JSON_PATH`: JSON body queries (e.g. `$.resultatregnskapResultat.aarsresultat`)
+  - `TABLE_CELL`: Structured table coordinate locator (`table_row`, `table_col`)
+  - `PDF_PAGE`: PDF document page numbers
+  - `TEXT_SPAN` / `LINE_SPAN`: Exact character offsets and line numbers
+- **Cryptographic Snapshot Hashing**: SHA-256 fingerprinting of source bytes or text (`compute_content_hash`, `verify_snapshot_match`) to detect changes and verify snapshot integrity.
+- **Temporal Provenance**: Explicit distinction between retrieval timestamp (`retrieved_at`), the date as-of when a fact was valid (`effective_date`), and the fiscal/reporting period covered (`reporting_period` / `reporting_date`).
+- **Wrong-Source Rejection & Fail-Closed Validation**:
+  - Rejects sources containing conflicting 9-digit organisation numbers or different legal entity names.
+  - Rejects parent company or group accounts conflating subsidiary facts without explicit attribution.
+  - Rejects third-party aggregators (`proff.no`, `purehelp.no`, `ratsit.no`, etc.) and search snippets.
+  - Rejects claims where the evidence span is not present in the source content.
+  - Rejects unsafe or private network URLs via SSRF validation (`assert_public_url`).
 
 ## Coverage limits
 

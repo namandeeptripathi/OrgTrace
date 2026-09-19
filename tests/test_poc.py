@@ -6,6 +6,7 @@ import csv
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import patch
 from pathlib import Path
 
@@ -92,6 +93,22 @@ from norway_company_agent.financial_intelligence import (  # noqa: E402
     extract_financial_pdfs,
     extract_financials_from_pdf,
     extract_official_accounts,
+)
+from norway_company_agent.evidence_engine import (  # noqa: E402
+    EvidenceSelector,
+    ExtractionMethod,
+    ProvenanceClaim,
+    SelectorType,
+    SourceAuthority,
+    ValidationStatus,
+    ValidationVerdict,
+    build_provenance_claim,
+    classify_source_authority,
+    compute_content_hash,
+    explain_authority_rank,
+    is_more_authoritative,
+    validate_claim_evidence,
+    verify_snapshot_match,
 )
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
@@ -2949,8 +2966,344 @@ class Stage4FinancialIntelligenceTests(unittest.TestCase):
             self.assertEqual(runs[0], runs[i], f"Non-deterministic financial profile at run {i + 1}")
 
 
+class Stage5EvidenceProvenanceTests(unittest.TestCase):
+    """Stage 5: Evidence & Provenance Engine tests."""
+
+    def test_claim_evidence_creation_and_fields(self):
+        selector = EvidenceSelector(
+            selector_type=SelectorType.CSS,
+            query="div.about-section > p.intro",
+            char_start=0,
+            char_end=120,
+        )
+        claim = ProvenanceClaim(
+            claim_id="claim-test-123",
+            field_name="description",
+            value="Norsk Fiskeeksport AS eksporterer fersk laks og hvitfisk fra Vestlandet.",
+            source_url="https://norskfiske.no/om-oss",
+            discovered_url="http://norskfiske.no/om-oss",
+            source_type="website_about_page",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+            retrieved_at="2026-09-20T00:00:00Z",
+            effective_date="2024-01-01",
+            reporting_period="2024",
+            content_sha256="abc123def456",
+            extraction_method=ExtractionMethod.HTML_TEXT,
+            selector=selector,
+            evidence_span="Norsk Fiskeeksport AS eksporterer fersk laks...",
+            confidence=0.9,
+            validation_status=ValidationStatus.ACCEPTED,
+        )
+
+        d = claim.to_dict()
+        self.assertEqual(d["claim_id"], "claim-test-123")
+        self.assertEqual(d["field_name"], "description")
+        self.assertEqual(d["source_authority"], 80)
+        self.assertEqual(d["extraction_method"], "html_text")
+        self.assertEqual(d["selector"]["selector_type"], "css")
+        self.assertEqual(d["selector"]["query"], "div.about-section > p.intro")
+        self.assertEqual(d["confidence"], 0.9)
+        self.assertEqual(d["validation_status"], "accepted")
+
+    def test_multiple_claims_independent_provenance(self):
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+        f_name = ExtractedField("company_name", "Norsk Fiskeeksport AS", FieldStatus.FOUND, "https://data.brreg.no/api/enheter/923609016", "official_registry", "Norsk Fiskeeksport AS", 1.0)
+        f_emp = ExtractedField("employees", 42, FieldStatus.FOUND, "https://data.brreg.no/api/enheter/923609016", "official_registry", "Antall ansatte: 42", 1.0)
+
+        claim_name = build_provenance_claim(f_name, target)
+        claim_emp = build_provenance_claim(f_emp, target)
+
+        self.assertNotEqual(claim_name.claim_id, claim_emp.claim_id, "Each claim must have an independent, unique identifier")
+        self.assertEqual(claim_name.field_name, "company_name")
+        self.assertEqual(claim_emp.field_name, "employees")
+        self.assertEqual(claim_name.source_authority, SourceAuthority.GOVERNMENT_REGISTRY)
+        self.assertEqual(claim_emp.source_authority, SourceAuthority.GOVERNMENT_REGISTRY)
+
+    def test_source_url_and_redirect_tracking(self):
+        # 1. Valid public URL with redirect tracking
+        claim_valid = ProvenanceClaim(
+            claim_id="claim-valid",
+            field_name="website",
+            value="https://norskfiske.no/",
+            source_url="https://norskfiske.no/",
+            discovered_url="http://norskfiske.no",
+            source_type="company_website",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+        )
+        verdict_valid = validate_claim_evidence(claim_valid, {"organisation_number": "923609016"})
+        self.assertTrue(verdict_valid.is_valid)
+        self.assertEqual(verdict_valid.status, ValidationStatus.ACCEPTED)
+
+        # 2. Unsafe local/private URL must be rejected
+        claim_unsafe = ProvenanceClaim(
+            claim_id="claim-unsafe",
+            field_name="revenue",
+            value=1000000,
+            source_url="http://127.0.0.1:8080/internal_financials",
+            source_type="internal_leak",
+        )
+        verdict_unsafe = validate_claim_evidence(claim_unsafe, {"organisation_number": "923609016"})
+        self.assertFalse(verdict_unsafe.is_valid)
+        self.assertEqual(verdict_unsafe.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("unsafe" in r.lower() or "non-public" in r.lower() for r in verdict_unsafe.reasons))
+
+    def test_timezone_aware_utc_timestamps(self):
+        claim = ProvenanceClaim(
+            claim_id="claim-time",
+            field_name="status",
+            value="active",
+            source_url="https://data.brreg.no/api/enheter/923609016",
+        )
+        # Default retrieved_at must be an ISO 8601 string with UTC indicator 'Z'
+        self.assertTrue(claim.retrieved_at.endswith("Z"))
+        # Parseable by datetime with timezone
+        dt = datetime.fromisoformat(claim.retrieved_at.replace("Z", "+00:00"))
+        self.assertIsNotNone(dt.tzinfo)
+
+    def test_temporal_provenance_distinctions(self):
+        """Strictly distinguish retrieved_at, effective_date, and reporting_period."""
+        claim = ProvenanceClaim(
+            claim_id="claim-temporal",
+            field_name="revenue",
+            value=100000000,
+            source_url="https://data.brreg.no/regnskap/923609016",
+            source_type="official_annual_accounts",
+            source_authority=SourceAuthority.GOVERNMENT_REGISTRY,
+            retrieved_at="2026-09-20T00:15:00Z",  # Crawl time
+            effective_date="2025-06-30",          # Filing submission date
+            reporting_period="2024-01-01 to 2024-12-31", # Period covered
+        )
+
+        self.assertNotEqual(claim.retrieved_at, claim.effective_date)
+        self.assertNotEqual(claim.retrieved_at, claim.reporting_period)
+        self.assertEqual(claim.reporting_period, "2024-01-01 to 2024-12-31")
+
+        # Missing date remains None, never fabricated
+        claim_no_date = ProvenanceClaim(
+            claim_id="claim-nodate",
+            field_name="phone",
+            value="+4755123456",
+            source_url="https://norskfiske.no/",
+        )
+        self.assertIsNone(claim_no_date.effective_date)
+        self.assertIsNone(claim_no_date.reporting_date)
+
+    def test_deterministic_content_hashing(self):
+        content_a = b"<html><head><title>Norsk Fiskeeksport</title></head></html>"
+        content_b = b"<html><head><title>Norsk Fiskeeksport</title></head></html>"
+        content_c = b"<html><head><title>Different Content</title></head></html>"
+
+        hash_a = compute_content_hash(content_a)
+        hash_b = compute_content_hash(content_b)
+        hash_c = compute_content_hash(content_c)
+
+        self.assertEqual(hash_a, hash_b, "Identical content must produce identical hash")
+        self.assertNotEqual(hash_a, hash_c, "Different content must produce different hash")
+        self.assertTrue(verify_snapshot_match(content_a, hash_a))
+        self.assertFalse(verify_snapshot_match(content_c, hash_a))
+
+    def test_extraction_methods_validation(self):
+        methods = [
+            ExtractionMethod.REGISTRY_API,
+            ExtractionMethod.STRUCTURED_DATA_JSONLD,
+            ExtractionMethod.HTML_TEXT,
+            ExtractionMethod.PDF_TEXT,
+            ExtractionMethod.FINANCIAL_STATEMENT,
+        ]
+        for m in methods:
+            claim = ProvenanceClaim(
+                claim_id=f"claim-{m.value}",
+                field_name="test_field",
+                value="test_val",
+                source_url="https://example.test/",
+                extraction_method=m,
+            )
+            self.assertEqual(claim.extraction_method, m)
+            self.assertEqual(claim.to_dict()["extraction_method"], m.value)
+
+    def test_evidence_selectors(self):
+        # 1. CSS Selector
+        s_css = EvidenceSelector(SelectorType.CSS, "header h1.company-title")
+        self.assertEqual(s_css.to_dict()["selector_type"], "css")
+
+        # 2. JSON Path
+        s_json = EvidenceSelector(SelectorType.JSON_PATH, "$.resultatregnskapResultat.aarsresultat")
+        self.assertEqual(s_json.to_dict()["selector_type"], "json_path")
+
+        # 3. PDF Page
+        s_pdf = EvidenceSelector(SelectorType.PDF_PAGE, "page 4", page_number=4)
+        self.assertEqual(s_pdf.page_number, 4)
+
+        # 4. Table Coordinates
+        s_table = EvidenceSelector(SelectorType.TABLE_CELL, "table#resultat", table_row=5, table_col=2)
+        self.assertEqual(s_table.table_row, 5)
+        self.assertEqual(s_table.table_col, 2)
+
+        # 5. Text Span with offsets
+        s_span = EvidenceSelector(SelectorType.TEXT_SPAN, "Norsk Fiskeeksport AS", char_start=50, char_end=71)
+        self.assertEqual(s_span.char_start, 50)
+        self.assertEqual(s_span.char_end, 71)
+
+    def test_source_authority_hierarchy(self):
+        # Verify 7-tier ranking
+        self.assertTrue(is_more_authoritative(SourceAuthority.GOVERNMENT_REGISTRY, SourceAuthority.OFFICIAL_FILING_COPY))
+        self.assertTrue(is_more_authoritative(SourceAuthority.OFFICIAL_FILING_COPY, SourceAuthority.VERIFIED_FIRST_PARTY))
+        self.assertTrue(is_more_authoritative(SourceAuthority.VERIFIED_FIRST_PARTY, SourceAuthority.FIRST_PARTY_STRUCTURED))
+        self.assertTrue(is_more_authoritative(SourceAuthority.FIRST_PARTY_STRUCTURED, SourceAuthority.REPUTABLE_SECONDARY))
+        self.assertTrue(is_more_authoritative(SourceAuthority.REPUTABLE_SECONDARY, SourceAuthority.SEARCH_DISCOVERY))
+        self.assertTrue(is_more_authoritative(SourceAuthority.SEARCH_DISCOVERY, SourceAuthority.UNVERIFIED_THIRD_PARTY))
+
+        # Classification helper
+        self.assertEqual(classify_source_authority("official_registry"), SourceAuthority.GOVERNMENT_REGISTRY)
+        self.assertEqual(classify_source_authority("website_jsonld"), SourceAuthority.FIRST_PARTY_STRUCTURED)
+        self.assertEqual(classify_source_authority("company_website"), SourceAuthority.VERIFIED_FIRST_PARTY)
+        self.assertEqual(classify_source_authority("search_candidate"), SourceAuthority.SEARCH_DISCOVERY)
+        self.assertEqual(classify_source_authority("unknown", "https://proff.no/selskap/123"), SourceAuthority.UNVERIFIED_THIRD_PARTY)
+
+        # Explanations
+        expl = explain_authority_rank(SourceAuthority.GOVERNMENT_REGISTRY)
+        self.assertIn("Brønnøysundregistrene", expl)
+
+    def test_wrong_source_rejection_wrong_company(self):
+        """Reject evidence when the source content explicitly belongs to a different legal entity."""
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+        wrong_content = "Dette er årsrapport for Helt Annen Bedrift AS, org nr 999888777. Vi driver med IT-konsulenttjenester."
+
+        claim = ProvenanceClaim(
+            claim_id="claim-wrong-company",
+            field_name="revenue",
+            value=5000000,
+            source_url="https://annenbedrift.no/regnskap",
+            source_type="company_website",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+            evidence_span="Driftsinntekter: 5 000 000",
+        )
+
+        verdict = validate_claim_evidence(claim, target, source_content=wrong_content)
+        self.assertFalse(verdict.is_valid)
+        self.assertEqual(verdict.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("conflicting organization numbers" in r.lower() or "different company" in r.lower() for r in verdict.reasons))
+
+    def test_wrong_source_rejection_parent_subsidiary(self):
+        """Reject parent company consolidated accounts when claimed as subsidiary standalone accounts."""
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+        parent_content = """
+        Konsernregnskap for Fiskeri Holding ASA
+        Dette konsernregnskapet omfatter alle konsernselskaper i Norge og utlandet.
+        Total omsetning: 1 500 000 000 NOK.
+        """
+
+        claim = ProvenanceClaim(
+            claim_id="claim-parent-conflation",
+            field_name="revenue",
+            value=1500000000,
+            source_url="https://holding.no/konsern",
+            source_type="company_website",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+            evidence_span="Total omsetning: 1 500 000 000 NOK.",
+        )
+
+        verdict = validate_claim_evidence(claim, target, source_content=parent_content)
+        self.assertFalse(verdict.is_valid)
+        self.assertEqual(verdict.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("conflates subsidiary identity" in r.lower() for r in verdict.reasons))
+
+    def test_wrong_source_rejection_aggregators_and_snippets(self):
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+
+        # 1. Third-party aggregator
+        claim_aggregator = ProvenanceClaim(
+            claim_id="claim-proff",
+            field_name="revenue",
+            value=50000000,
+            source_url="https://proff.no/selskap/norsk-fiskeeksport-as/bergen/fisk/IF00123/",
+            source_type="third_party_directory",
+            source_authority=SourceAuthority.UNVERIFIED_THIRD_PARTY,
+            evidence_span="Omsetning: 50 000 000",
+        )
+        v_agg = validate_claim_evidence(claim_aggregator, target)
+        self.assertFalse(v_agg.is_valid)
+        self.assertEqual(v_agg.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("aggregator" in r.lower() or "directory" in r.lower() for r in v_agg.reasons))
+
+        # 2. Search candidate snippet
+        claim_snippet = ProvenanceClaim(
+            claim_id="claim-snippet",
+            field_name="employees",
+            value=25,
+            source_url="https://www.bing.com/search?q=norsk+fiskeeksport",
+            source_type="search_candidate",
+            source_authority=SourceAuthority.SEARCH_DISCOVERY,
+            evidence_span="Norsk Fiskeeksport har 25 ansatte...",
+        )
+        v_snip = validate_claim_evidence(claim_snippet, target)
+        self.assertFalse(v_snip.is_valid)
+        self.assertEqual(v_snip.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("search" in r.lower() for r in v_snip.reasons))
+
+    def test_evidence_span_verification_in_source(self):
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+        source_text = "Norsk Fiskeeksport AS (org 923609016) ble etablert i 1995. Vi har 42 ansatte."
+
+        # Valid span present in content
+        claim_ok = ProvenanceClaim(
+            claim_id="claim-ok",
+            field_name="employees",
+            value=42,
+            source_url="https://norskfiske.no/om-oss",
+            source_type="website_about_page",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+            evidence_span="Vi har 42 ansatte.",
+        )
+        v_ok = validate_claim_evidence(claim_ok, target, source_content=source_text)
+        self.assertTrue(v_ok.is_valid)
+
+        # Span NOT present in content -> reject
+        claim_bogus = ProvenanceClaim(
+            claim_id="claim-bogus",
+            field_name="employees",
+            value=500,
+            source_url="https://norskfiske.no/om-oss",
+            source_type="website_about_page",
+            source_authority=SourceAuthority.VERIFIED_FIRST_PARTY,
+            evidence_span="Vi er nå over 500 ansatte i Norge.",
+        )
+        v_bogus = validate_claim_evidence(claim_bogus, target, source_content=source_text)
+        self.assertFalse(v_bogus.is_valid)
+        self.assertEqual(v_bogus.status, ValidationStatus.REJECTED)
+        self.assertTrue(any("not found in source content" in r.lower() for r in v_bogus.reasons))
+
+    def test_stage3_and_stage4_provenance_integration(self):
+        target = {"organisation_number": "923609016", "name": "Norsk Fiskeeksport AS"}
+
+        # Stage 3 ExtractedField integration
+        ext_field = ExtractedField(
+            field_name="industry",
+            value={"code": "03.111", "label": "Havfiske"},
+            status=FieldStatus.FOUND,
+            source_url="https://data.brreg.no/api/enheter/923609016",
+            source_type="official_registry",
+            evidence_span="NACE 03.111: Havfiske",
+            confidence=1.0,
+        )
+        claim_ind = build_provenance_claim(ext_field, target)
+        self.assertEqual(claim_ind.field_name, "industry")
+        self.assertEqual(claim_ind.source_authority, SourceAuthority.GOVERNMENT_REGISTRY)
+        self.assertEqual(claim_ind.extraction_method, ExtractionMethod.REGISTRY_API)
+        self.assertEqual(claim_ind.validation_status, ValidationStatus.ACCEPTED)
+
+        # Stage 4 FinancialStatement integration
+        f_rev = ExtractedField("revenue", 100000000, FieldStatus.FOUND, "https://data.brreg.no/regnskap/923609016", "official_regnskapsregisteret", "revenue: 100000000 NOK", 1.0)
+        claim_rev = build_provenance_claim(f_rev, target, reporting_period="2024", extraction_method=ExtractionMethod.FINANCIAL_STATEMENT)
+        self.assertEqual(claim_rev.field_name, "revenue")
+        self.assertEqual(claim_rev.value, 100000000)
+        self.assertEqual(claim_rev.reporting_period, "2024")
+        self.assertEqual(claim_rev.extraction_method, ExtractionMethod.FINANCIAL_STATEMENT)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 
