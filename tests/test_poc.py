@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import json
-import gzip
+import copy
 import csv
+import gzip
+import json
 import sys
 import tempfile
+import time
 import unittest
 from datetime import datetime, timezone
-from unittest.mock import patch
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -141,6 +143,31 @@ from norway_company_agent.change_intelligence import (  # noqa: E402
     is_material_change,
     normalize_semantic_value,
     refresh_company_intelligence,
+)
+from norway_company_agent.strategy_harness import (  # noqa: E402
+    PromotionCriteria,
+    PromotionDecision,
+    StrategyAttempt,
+    StrategyDefinition,
+    StrategyMetrics,
+    StrategyRegistry,
+    StrategyStatus,
+    compare_strategies,
+    evaluate_promotion,
+    evaluate_strategy_attempts,
+)
+from norway_company_agent.batch_engine import (  # noqa: E402
+    BatchCompanyResult,
+    BatchTerminalState,
+    CompetitionBatchEngine,
+    EvaluationEnvelope,
+    ManifestValidationResult,
+    ResultCache,
+    RunManifest,
+    SharedBudgetTracker,
+    compute_output_fingerprint,
+    iter_company_inputs,
+    validate_manifest,
 )
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
@@ -3869,6 +3896,551 @@ class Stage7ChangeIntelligenceTests(unittest.TestCase):
         self.assertEqual(len(history), 2)
         self.assertEqual(history[0].version, 1)
         self.assertEqual(history[1].version, 2)
+class Stage8StrategyHarnessTests(unittest.TestCase):
+    """Stage 8: Learning & Strategy Harness tests."""
+
+    def setUp(self):
+        self.registry = StrategyRegistry()
+
+    def test_registry_creation_and_registration(self):
+        strat = StrategyDefinition(
+            strategy_id="strat-alpha",
+            version="1.0.0",
+            description="Alpha baseline strategy",
+            configuration={"depth": 2, "timeout": 15},
+            status=StrategyStatus.CANDIDATE,
+        )
+        self.registry.register_strategy(strat)
+
+        # Retrieve by exact key
+        retrieved = self.registry.get_strategy("strat-alpha", "1.0.0")
+        self.assertIsNotNone(retrieved)
+        self.assertEqual(retrieved.strategy_id, "strat-alpha")
+        self.assertEqual(retrieved.version, "1.0.0")
+        self.assertEqual(retrieved.configuration["depth"], 2)
+
+        # Retrieve latest version
+        latest = self.registry.get_strategy("strat-alpha")
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.version, "1.0.0")
+
+        # List strategies
+        all_strats = self.registry.list_strategies()
+        self.assertEqual(len(all_strats), 1)
+
+    def test_duplicate_strategy_version_handling(self):
+        strat1 = StrategyDefinition("strat-b", "1.0", "Original", {"k": 1})
+        self.registry.register_strategy(strat1)
+
+        # Candidate can be updated
+        strat2 = StrategyDefinition("strat-b", "1.0", "Updated", {"k": 2})
+        self.registry.register_strategy(strat2)
+        self.assertEqual(self.registry.get_strategy("strat-b", "1.0").configuration["k"], 2)
+
+        # Frozen strategy cannot be overwritten
+        self.registry.set_frozen_strategy("strat-b", "1.0")
+        strat3 = StrategyDefinition("strat-b", "1.0", "Attempted Overwrite", {"k": 3})
+        with self.assertRaises(ValueError):
+            self.registry.register_strategy(strat3)
+
+    def test_attempt_recording(self):
+        attempt = StrategyAttempt(
+            strategy_id="strat-alpha",
+            strategy_version="1.0.0",
+            profile_id="923609016",
+            attempt_id="att-12345",
+            input_fingerprint="inp-sha256",
+            output_fingerprint="out-sha256",
+            terminal_state="complete",
+            success=True,
+            request_count=4,
+            runtime_ms=125.5,
+            cost=0.002,
+        )
+        d = attempt.to_dict()
+        self.assertEqual(d["strategy_id"], "strat-alpha")
+        self.assertEqual(d["profile_id"], "923609016")
+        self.assertTrue(d["success"])
+        self.assertEqual(d["request_count"], 4)
+        self.assertEqual(d["runtime_ms"], 125.5)
+
+    def test_success_failure_aggregation_and_metrics(self):
+        attempts = [
+            StrategyAttempt("strat-a", "1.0", f"9236090{i}", f"att-{i}", "in", "out", "complete", True, request_count=2, runtime_ms=100.0, cost=0.01)
+            for i in range(8)
+        ] + [
+            StrategyAttempt("strat-a", "1.0", f"9998880{i}", f"att-fail-{i}", "in", "out", "source_error", False, request_count=1, runtime_ms=50.0, cost=0.005)
+            for i in range(2)
+        ]
+
+        metrics = evaluate_strategy_attempts(attempts, total_eligible_profiles=10)
+        self.assertEqual(metrics.total_attempts, 10)
+        self.assertEqual(metrics.successful_attempts, 8)
+        self.assertEqual(metrics.failed_attempts, 2)
+        self.assertEqual(metrics.precision, 0.8)
+        self.assertEqual(metrics.coverage, 0.8)
+        self.assertEqual(metrics.error_rate, 0.2)
+        self.assertEqual(metrics.total_requests, 18)  # 8*2 + 2*1
+        self.assertEqual(metrics.avg_requests_per_attempt, 1.8)
+        self.assertEqual(metrics.total_cost, 0.09)  # 8*0.01 + 2*0.005
+
+    def test_challenger_comparison(self):
+        baseline = StrategyMetrics(
+            strategy_id="strat-base", strategy_version="1.0",
+            total_attempts=100, successful_attempts=80, failed_attempts=20,
+            precision=0.80, coverage=0.80, error_rate=0.20,
+            total_requests=200, avg_requests_per_attempt=2.0,
+            total_runtime_ms=10000.0, avg_runtime_ms=100.0,
+            total_cost=1.0, avg_cost_per_attempt=0.01,
+        )
+        challenger = StrategyMetrics(
+            strategy_id="strat-chal", strategy_version="2.0",
+            total_attempts=100, successful_attempts=90, failed_attempts=10,
+            precision=0.90, coverage=0.90, error_rate=0.10,
+            total_requests=220, avg_requests_per_attempt=2.2,
+            total_runtime_ms=11000.0, avg_runtime_ms=110.0,
+            total_cost=1.1, avg_cost_per_attempt=0.011,
+        )
+
+        deltas = compare_strategies(baseline, challenger)
+        self.assertAlmostEqual(deltas["precision_delta"], 0.10)
+        self.assertAlmostEqual(deltas["coverage_delta"], 0.10)
+        self.assertAlmostEqual(deltas["requests_ratio"], 1.10)
+        self.assertAlmostEqual(deltas["runtime_ratio"], 1.10)
+        self.assertAlmostEqual(deltas["cost_ratio"], 1.10)
+
+    def test_precision_first_promotion_accepted(self):
+        baseline = StrategyMetrics(
+            strategy_id="prod", strategy_version="1.0",
+            total_attempts=100, successful_attempts=95, failed_attempts=5,
+            precision=0.95, coverage=0.80, error_rate=0.05,
+            total_requests=300, avg_requests_per_attempt=3.0,
+            total_runtime_ms=15000.0, avg_runtime_ms=150.0,
+            total_cost=1.5, avg_cost_per_attempt=0.015,
+        )
+        # Challenger improves coverage without precision degradation
+        challenger = StrategyMetrics(
+            strategy_id="chal", strategy_version="2.0",
+            total_attempts=100, successful_attempts=96, failed_attempts=4,
+            precision=0.96, coverage=0.85, error_rate=0.04,
+            total_requests=330, avg_requests_per_attempt=3.3,  # 1.1x
+            total_runtime_ms=16500.0, avg_runtime_ms=165.0,   # 1.1x
+            total_cost=1.65, avg_cost_per_attempt=0.0165,     # 1.1x
+        )
+
+        decision = evaluate_promotion(baseline, challenger)
+        self.assertTrue(decision.promoted)
+        self.assertTrue(all(decision.gate_checks.values()))
+
+    def test_precision_first_promotion_rejected_on_precision_drop(self):
+        # Challenger has HIGHER coverage (0.90 vs 0.80), but LOWER precision (0.90 vs 0.95)
+        baseline = StrategyMetrics(
+            strategy_id="prod", strategy_version="1.0",
+            total_attempts=100, successful_attempts=95, failed_attempts=5,
+            precision=0.95, coverage=0.80, error_rate=0.05,
+            total_requests=300, avg_requests_per_attempt=3.0,
+            total_runtime_ms=15000.0, avg_runtime_ms=150.0,
+            total_cost=1.5, avg_cost_per_attempt=0.015,
+        )
+        challenger = StrategyMetrics(
+            strategy_id="chal", strategy_version="2.0",
+            total_attempts=100, successful_attempts=90, failed_attempts=10,
+            precision=0.90, coverage=0.90, error_rate=0.10,
+            total_requests=300, avg_requests_per_attempt=3.0,
+            total_runtime_ms=15000.0, avg_runtime_ms=150.0,
+            total_cost=1.5, avg_cost_per_attempt=0.015,
+        )
+
+        decision = evaluate_promotion(baseline, challenger, criteria=PromotionCriteria(max_precision_drop=0.0))
+        self.assertFalse(decision.promoted)
+        self.assertFalse(decision.gate_checks["precision_preserved"])
+        self.assertIn("Precision dropped", decision.reason)
+
+    def test_precision_first_promotion_rejected_on_resource_blowup(self):
+        # Challenger preserves precision, but 3x request usage exceeds 1.25x limit
+        baseline = StrategyMetrics(
+            strategy_id="prod", strategy_version="1.0",
+            total_attempts=100, successful_attempts=95, failed_attempts=5,
+            precision=0.95, coverage=0.80, error_rate=0.05,
+            total_requests=300, avg_requests_per_attempt=3.0,
+            total_runtime_ms=15000.0, avg_runtime_ms=150.0,
+            total_cost=1.5, avg_cost_per_attempt=0.015,
+        )
+        challenger = StrategyMetrics(
+            strategy_id="chal", strategy_version="2.0",
+            total_attempts=100, successful_attempts=96, failed_attempts=4,
+            precision=0.96, coverage=0.85, error_rate=0.04,
+            total_requests=900, avg_requests_per_attempt=9.0,  # 3.0x blowup!
+            total_runtime_ms=16500.0, avg_runtime_ms=165.0,
+            total_cost=1.65, avg_cost_per_attempt=0.0165,
+        )
+
+        decision = evaluate_promotion(baseline, challenger)
+        self.assertFalse(decision.promoted)
+        self.assertFalse(decision.gate_checks["requests_bounded"])
+        self.assertIn("Request ratio", decision.reason)
+
+    def test_frozen_production_strategy_lifecycle(self):
+        # 1. Register and freeze v1
+        strat_v1 = StrategyDefinition("prod-strat", "1.0.0", "V1 Baseline", {"depth": 1})
+        self.registry.register_strategy(strat_v1)
+        self.registry.set_frozen_strategy("prod-strat", "1.0.0")
+
+        frozen = self.registry.get_frozen_strategy()
+        self.assertIsNotNone(frozen)
+        self.assertEqual(frozen.version, "1.0.0")
+        self.assertEqual(frozen.status, StrategyStatus.FROZEN)
+
+        # 2. Register challenger v2
+        strat_v2 = StrategyDefinition("prod-strat", "2.0.0", "V2 Challenger", {"depth": 2}, status=StrategyStatus.CHALLENGER)
+        self.registry.register_strategy(strat_v2)
+
+        # 3. Explicit promotion replaces frozen strategy and marks v1 retired
+        self.registry.set_frozen_strategy("prod-strat", "2.0.0")
+        new_frozen = self.registry.get_frozen_strategy()
+        self.assertEqual(new_frozen.version, "2.0.0")
+        self.assertEqual(new_frozen.status, StrategyStatus.FROZEN)
+
+        old_v1 = self.registry.get_strategy("prod-strat", "1.0.0")
+        self.assertEqual(old_v1.status, StrategyStatus.RETIRED)
+
+
+class Stage9CompetitionBatchTests(unittest.TestCase):
+    """Stage 9: Competition Batch Engine tests."""
+
+    def test_small_batch_execution(self):
+        orgs = [f"92360901{i}" for i in range(5)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-small",
+            selected_organisations=orgs,
+            max_evaluation_count=5,
+            request_budget=50,
+            runtime_budget_seconds=10.0,
+            cost_budget=1.0,
+        )
+
+        def mock_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            allowed, _ = budget.acquire_requests(2)
+            budget.acquire_cost(0.01)
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE if allowed else BatchTerminalState.REQUEST_BUDGET_EXCEEDED,
+                success=allowed,
+                data={"name": f"Company {company['organisation_number']}"},
+                requests_used=2 if allowed else 0,
+                cost_incurred=0.01 if allowed else 0.0,
+            )
+
+        engine = CompetitionBatchEngine(envelope, mock_worker, max_workers=2)
+        results, manifest = engine.run()
+
+        self.assertEqual(len(results), 5)
+        self.assertEqual(manifest.completed_count, 5)
+        self.assertEqual(manifest.failed_count, 0)
+        self.assertEqual(manifest.total_requests_used, 10)
+
+        # Validate manifest
+        val = validate_manifest(manifest, envelope, results)
+        self.assertTrue(val.passed, f"Validation errors: {val.errors}")
+
+    def test_100_company_envelope_enforcement(self):
+        # 150 organisations provided, but envelope specifies max 100
+        orgs = [f"9236{i:05d}" for i in range(150)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-100-cap",
+            selected_organisations=orgs,
+            max_evaluation_count=100,
+        )
+        self.assertEqual(len(envelope.selected_organisations), 100, "Envelope must cap at max_evaluation_count")
+
+        def mock_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            budget.acquire_requests(1)
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+                requests_used=1,
+            )
+
+        engine = CompetitionBatchEngine(envelope, mock_worker, max_workers=4)
+        results, manifest = engine.run()
+        self.assertEqual(len(results), 100)
+        self.assertEqual(manifest.evaluation_count, 100)
+
+    def test_1000_plus_input_dataset_streaming(self):
+        # Stream 1,250 items in chunks of 100
+        input_data = [f"9236{i:05d}" for i in range(1250)]
+        chunks = list(iter_company_inputs(input_data, chunk_size=100))
+        self.assertEqual(len(chunks), 13)
+        self.assertEqual(len(chunks[0]), 100)
+        self.assertEqual(len(chunks[-1]), 50)
+        total_streamed = sum(len(c) for c in chunks)
+        self.assertEqual(total_streamed, 1250)
+
+    def test_deterministic_ordering(self):
+        # 10 companies evaluated in parallel with variable worker sleep
+        orgs = [f"9236090{i:02d}" for i in range(10)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-ordering",
+            selected_organisations=orgs,
+            max_evaluation_count=10,
+        )
+
+        def worker_with_jitter(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            # Sleep in reverse order to introduce race condition in completion
+            org_idx = int(company["organisation_number"][-2:])
+            time.sleep((10 - org_idx) * 0.005)
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+                requests_used=1,
+            )
+
+        engine = CompetitionBatchEngine(envelope, worker_with_jitter, max_workers=4)
+        results, manifest = engine.run()
+
+        # Verify results strictly match initial envelope order
+        result_orgs = [r.organisation_number for r in results]
+        self.assertEqual(result_orgs, orgs, "Results must strictly preserve envelope ordering regardless of thread completion")
+
+    def test_parallel_request_budget_enforcement_race_condition(self):
+        # 10 workers in parallel evaluating 20 companies
+        # Hard request budget is 15 requests total
+        # Each company attempts 2 requests
+        # Max allowed requests is 15 -> after 7 companies (14 reqs), 8th company will fail request acquisition
+        orgs = [f"923609{i:03d}" for i in range(20)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-req-race",
+            selected_organisations=orgs,
+            max_evaluation_count=20,
+            request_budget=15,  # Strict hard cap
+        )
+
+        def greedy_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            allowed, stop_reason = budget.acquire_requests(2)
+            if not allowed:
+                return BatchCompanyResult(
+                    organisation_number=company["organisation_number"],
+                    terminal_state=stop_reason or BatchTerminalState.REQUEST_BUDGET_EXCEEDED,
+                    success=False,
+                    requests_used=0,
+                )
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+                requests_used=2,
+            )
+
+        engine = CompetitionBatchEngine(envelope, greedy_worker, max_workers=8)
+        results, manifest = engine.run()
+
+        # Hard budget guarantee: requests_used CANNOT exceed 15 under any race condition!
+        self.assertLessEqual(manifest.total_requests_used, 15)
+        # At least one company must have been stopped with REQUEST_BUDGET_EXCEEDED
+        exceeded = [r for r in results if r.terminal_state == BatchTerminalState.REQUEST_BUDGET_EXCEEDED]
+        self.assertGreater(len(exceeded), 0)
+
+    def test_parallel_cost_budget_enforcement_race_condition(self):
+        # Cost budget is 0.50 NOK
+        orgs = [f"923609{i:03d}" for i in range(15)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-cost-race",
+            selected_organisations=orgs,
+            max_evaluation_count=15,
+            cost_budget=0.50,
+        )
+
+        def cost_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            allowed, stop_reason = budget.acquire_cost(0.12)
+            if not allowed:
+                return BatchCompanyResult(
+                    organisation_number=company["organisation_number"],
+                    terminal_state=stop_reason or BatchTerminalState.COST_BUDGET_EXCEEDED,
+                    success=False,
+                    cost_incurred=0.0,
+                )
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+                cost_incurred=0.12,
+            )
+
+        engine = CompetitionBatchEngine(envelope, cost_worker, max_workers=4)
+        results, manifest = engine.run()
+
+        # Hard budget guarantee: total_cost_incurred CANNOT exceed 0.50
+        self.assertLessEqual(manifest.total_cost_incurred, 0.50)
+        exceeded = [r for r in results if r.terminal_state == BatchTerminalState.COST_BUDGET_EXCEEDED]
+        self.assertGreater(len(exceeded), 0)
+
+    def test_runtime_budget_enforcement(self):
+        orgs = [f"923609{i:03d}" for i in range(6)]
+        envelope = EvaluationEnvelope(
+            envelope_id="test-runtime",
+            selected_organisations=orgs,
+            max_evaluation_count=6,
+            runtime_budget_seconds=0.01,  # Short budget: 10ms
+        )
+
+        def slow_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            time.sleep(0.02)
+            ok, stop_reason = budget.check_runtime()
+            if not ok:
+                return BatchCompanyResult(
+                    organisation_number=company["organisation_number"],
+                    terminal_state=stop_reason or BatchTerminalState.RUNTIME_BUDGET_EXCEEDED,
+                    success=False,
+                )
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+            )
+
+        engine = CompetitionBatchEngine(envelope, slow_worker, max_workers=1)
+        results, manifest = engine.run()
+
+        # Results after budget expiry must be marked with RUNTIME_BUDGET_EXCEEDED
+        runtime_stopped = [r for r in results if r.terminal_state == BatchTerminalState.RUNTIME_BUDGET_EXCEEDED]
+        self.assertGreater(len(runtime_stopped), 0)
+
+    def test_failed_individual_company_handling(self):
+        orgs = ["923609001", "923609002", "923609003"]
+        envelope = EvaluationEnvelope("test-err", orgs, max_evaluation_count=3)
+
+        def error_worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            if company["organisation_number"] == "923609002":
+                raise RuntimeError("Unexpected connector explosion")
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+            )
+
+        engine = CompetitionBatchEngine(envelope, error_worker, max_workers=2)
+        results, manifest = engine.run()
+
+        self.assertEqual(len(results), 3)
+        self.assertEqual(results[0].terminal_state, BatchTerminalState.COMPLETE)
+        self.assertEqual(results[1].terminal_state, BatchTerminalState.FAILED)
+        self.assertIn("Unexpected connector explosion", results[1].error_message)
+        self.assertEqual(results[2].terminal_state, BatchTerminalState.COMPLETE)
+
+    def test_resume_and_valid_cache_hit(self):
+        cache = ResultCache()
+        orgs = ["923609001", "923609002"]
+        envelope = EvaluationEnvelope("test-cache", orgs, max_evaluation_count=2)
+
+        call_counts = {"count": 0}
+
+        def worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            call_counts["count"] += 1
+            budget.acquire_requests(1)
+            return BatchCompanyResult(
+                organisation_number=company["organisation_number"],
+                terminal_state=BatchTerminalState.COMPLETE,
+                success=True,
+                requests_used=1,
+            )
+
+        # Run 1: fresh execution
+        engine1 = CompetitionBatchEngine(envelope, worker, max_workers=2, cache=cache)
+        res1, man1 = engine1.run()
+        self.assertEqual(call_counts["count"], 2)
+        self.assertEqual(man1.cache_info["cached_hits"], 0)
+
+        # Run 2: identical envelope reuses cache
+        engine2 = CompetitionBatchEngine(envelope, worker, max_workers=2, cache=cache)
+        res2, man2 = engine2.run()
+        self.assertEqual(call_counts["count"], 2, "Worker should not be invoked on cache hit")
+        self.assertEqual(man2.cache_info["cached_hits"], 2)
+        self.assertTrue(all(r.cached for r in res2))
+
+    def test_stale_cache_rejection(self):
+        cache = ResultCache()
+        orgs = ["923609001"]
+        env_v1 = EvaluationEnvelope("test-stale", orgs, strategy_version="v1")
+        env_v2 = EvaluationEnvelope("test-stale", orgs, strategy_version="v2")
+
+        calls = {"count": 0}
+
+        def worker(company: dict[str, Any], budget: SharedBudgetTracker) -> BatchCompanyResult:
+            calls["count"] += 1
+            return BatchCompanyResult(company["organisation_number"], BatchTerminalState.COMPLETE, True)
+
+        # Run 1: v1
+        engine1 = CompetitionBatchEngine(env_v1, worker, cache=cache)
+        engine1.run()
+        self.assertEqual(calls["count"], 1)
+
+        # Run 2: v2 must reject v1 cache and re-execute
+        engine2 = CompetitionBatchEngine(env_v2, worker, cache=cache)
+        res2, man2 = engine2.run()
+        self.assertEqual(calls["count"], 2, "Incompatible strategy version must invalidate cache")
+        self.assertEqual(man2.cache_info["cached_hits"], 0)
+
+    def test_manifest_validation_detects_mismatches(self):
+        orgs = ["923609001", "923609002"]
+        envelope = EvaluationEnvelope("test-val", orgs)
+
+        results = [
+            BatchCompanyResult("923609001", BatchTerminalState.COMPLETE, True),
+            BatchCompanyResult("923609002", BatchTerminalState.COMPLETE, True),
+        ]
+        manifest = RunManifest(
+            run_id="run-test-val",
+            strategy_id="default",
+            strategy_version="v1",
+            input_dataset_fingerprint="inp",
+            selected_evaluation_set=orgs,
+            evaluation_count=2,
+            budgets=envelope.to_dict(),
+            config_fingerprint=envelope.config_fingerprint,
+            completed_count=2,
+            failed_count=0,
+            terminal_state_counts={"complete": 2},
+            total_requests_used=0,
+            total_cost_incurred=0.0,
+            total_runtime_seconds=0.1,
+            output_fingerprint=compute_output_fingerprint(results),
+            cache_info={},
+            schema_version="1.0.0",
+        )
+
+        # 1. Valid manifest passes
+        val = validate_manifest(manifest, envelope, results)
+        self.assertTrue(val.passed)
+
+        # 2. Strategy mismatch detected
+        bad_strat = copy.deepcopy(manifest)
+        bad_strat.strategy_version = "v99"
+        val_bad_strat = validate_manifest(bad_strat, envelope, results)
+        self.assertFalse(val_bad_strat.passed)
+        self.assertIn("Strategy mismatch", val_bad_strat.errors[0])
+
+        # 3. Output fingerprint mismatch detected
+        bad_fp = copy.deepcopy(manifest)
+        bad_fp.output_fingerprint = "corrupted-fp"
+        val_bad_fp = validate_manifest(bad_fp, envelope, results)
+        self.assertFalse(val_bad_fp.passed)
+        self.assertTrue(any("Output fingerprint mismatch" in e for e in val_bad_fp.errors))
+
+    def test_deterministic_output_fingerprint(self):
+        orgs = ["923609001", "923609002"]
+        r1 = [
+            BatchCompanyResult("923609001", BatchTerminalState.COMPLETE, True, data={"score": 85}),
+            BatchCompanyResult("923609002", BatchTerminalState.COMPLETE, True, data={"score": 90}),
+        ]
+        r2 = [
+            BatchCompanyResult("923609001", BatchTerminalState.COMPLETE, True, data={"score": 85}),
+            BatchCompanyResult("923609002", BatchTerminalState.COMPLETE, True, data={"score": 90}),
+        ]
+        fp1 = compute_output_fingerprint(r1)
+        fp2 = compute_output_fingerprint(r2)
+        self.assertEqual(fp1, fp2)
 
 
 if __name__ == "__main__":

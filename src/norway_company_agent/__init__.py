@@ -114,5 +114,30 @@ from .change_intelligence import (
     normalize_semantic_value,
     refresh_company_intelligence,
 )
+from .strategy_harness import (
+    PromotionCriteria,
+    PromotionDecision,
+    StrategyAttempt,
+    StrategyDefinition,
+    StrategyMetrics,
+    StrategyRegistry,
+    StrategyStatus,
+    compare_strategies,
+    evaluate_promotion,
+    evaluate_strategy_attempts,
+)
+from .batch_engine import (
+    BatchCompanyResult,
+    BatchTerminalState,
+    CompetitionBatchEngine,
+    EvaluationEnvelope,
+    ManifestValidationResult,
+    ResultCache,
+    RunManifest,
+    SharedBudgetTracker,
+    compute_output_fingerprint,
+    iter_company_inputs,
+    validate_manifest,
+)
 
 

@@ -132,6 +132,30 @@ The Stage 7 change detection and refresh engine (`norway_company_agent.change_in
 - **Idempotent Reruns**: Rerunning the refresh pipeline with identical input state produces identical snapshots and zero duplicate changes.
 - **Versioned Snapshot Store**: In-memory `MemorySnapshotStore` maintains chronological snapshot history per organisation number.
 
+## Stage 8 — Learning & Strategy Harness
+
+The Stage 8 strategy harness (`norway_company_agent.strategy_harness`) provides systematic strategy lifecycle management, reproducible evaluations, and precision-first promotion:
+- **Strategy Registry (`StrategyRegistry`)**: Central registry managing `StrategyDefinition` records with stable strategy IDs, versions, configurations, and lifecycle statuses (`CHALLENGER`, `CANDIDATE`, `PROMOTED`, `FROZEN`, `RETIRED`).
+- **Frozen Production Strategy**: Guarantees exactly one active frozen production strategy for a given evaluation configuration. Frozen strategies cannot be silently replaced and can only be updated through explicit, audited promotion.
+- **Strategy Attempts (`StrategyAttempt`)**: Every strategy execution records input/output fingerprints, terminal state, success status, request count, runtime (ms), and cost for reproducible offline evaluation.
+- **Success & Failure Tracking (`evaluate_strategy_attempts`)**: Aggregates attempts into exact metrics: `precision` (successful / total attempts), `coverage` (successful / eligible profiles), `error_rate`, request usage, runtime, and cost.
+- **Precision-First Promotion Engine (`evaluate_promotion`)**:
+  - *Precision Primary Constraint*: A challenger strategy cannot be promoted if its precision drops below baseline or below the configured minimum (`min_precision`), regardless of any coverage gain.
+  - *Coverage Improvement*: Evaluated as a secondary gate after precision preservation is verified.
+  - *Resource Bounds*: Rejects challengers whose request count, runtime, or cost ratios exceed configured ceilings (`max_request_increase_ratio`, `max_runtime_increase_ratio`, `max_cost_increase_ratio`).
+  - *Explainability*: Produces machine-readable `PromotionDecision` detailing individual gate checks and metric deltas.
+
+## Stage 9 — Competition Batch Engine
+
+The Stage 9 batch engine (`norway_company_agent.batch_engine`) orchestrates high-throughput, bounded competition evaluations over the single-company pipeline:
+- **1,000+ Profile Streaming Support**: Stream inputs via `iter_company_inputs` in configurable chunks, avoiding high memory overhead and enabling large-scale evaluation datasets.
+- **100-Company Evaluation Envelope (`EvaluationEnvelope`)**: Explicitly bounds the evaluation scope (selected organisations, maximum evaluation count, request budget, runtime budget, cost budget, strategy ID/version, configuration fingerprint). The engine never evaluates more than the configured envelope ceiling.
+- **Exact Terminal States (`BatchTerminalState`)**: Every evaluation concludes with an explicit, mutually exclusive terminal state (`complete`, `source_error`, `request_budget_exceeded`, `runtime_budget_exceeded`, `cost_budget_exceeded`, `invalid_input`, `not_found`, `not_applicable`, `blocked_policy`, `blocked_robots`, `cancelled`). Zero silent drops.
+- **Parallelism & Thread-Safe Shared Budgets (`SharedBudgetTracker`)**: Bounded multi-threading via `ThreadPoolExecutor` with atomic, lock-protected request, runtime, and cost accounting. Prevents race conditions from collectively exceeding budgets under parallel load.
+- **Resumable Result Cache (`ResultCache`)**: Deterministic cache keys (`compute_cache_key`) factoring organisation number, strategy ID, strategy version, config fingerprint, and schema version. Reuses valid prior results while strictly rejecting stale or mismatched cache entries.
+- **Deterministic Output Ordering**: Results are deterministically ordered according to the evaluation envelope's initial sequence regardless of thread completion order. Timestamps and random IDs are kept in metadata and excluded from output fingerprints (`compute_output_fingerprint`).
+- **Run Manifest & Validation (`RunManifest`, `validate_manifest`)**: Emits a comprehensive run manifest verifying strategy match, count match, unique organisation membership, valid terminal states, budget consistency, and deterministic output fingerprints.
+
 ## Coverage limits
 
 - Public annual accounts do not exist for every registered entity. AS and ASA generally file; many sole
