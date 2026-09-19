@@ -155,6 +155,65 @@ The Stage 9 batch engine (`norway_company_agent.batch_engine`) orchestrates high
 - **Resumable Result Cache (`ResultCache`)**: Deterministic cache keys (`compute_cache_key`) factoring organisation number, strategy ID, strategy version, config fingerprint, and schema version. Reuses valid prior results while strictly rejecting stale or mismatched cache entries.
 - **Deterministic Output Ordering**: Results are deterministically ordered according to the evaluation envelope's initial sequence regardless of thread completion order. Timestamps and random IDs are kept in metadata and excluded from output fingerprints (`compute_output_fingerprint`).
 - **Run Manifest & Validation (`RunManifest`, `validate_manifest`)**: Emits a comprehensive run manifest verifying strategy match, count match, unique organisation membership, valid terminal states, budget consistency, and deterministic output fingerprints.
+## Stage 10 — Evaluation & Optimization
+
+The Stage 10 evaluation and optimization layer (`norway_company_agent.evaluation`, `norway_company_agent.evaluation_dataset`) provides reproducible, machine-readable benchmarking across the enrichment pipeline:
+- **Deterministic 9-Category Evaluation Dataset (`build_deterministic_evaluation_dataset`)**:
+  1. *Exact Norwegian Companies*: Active AS with official website, annual accounts, and public roles.
+  2. *Ambiguous Company Names*: Generic names matching multiple entities; validates safe abstention without unique org numbers.
+  3. *Subsidiary Companies*: Operating entities with distinct org numbers; prevents conflation with parent holding accounts.
+  4. *Parent Companies*: Holding entities with consolidated accounts and multiple subsidiary links.
+  5. *Similarly Named Companies*: Companies with near-identical names; verifies rejection of false attribution.
+  6. *Weak Web Presence*: Companies lacking websites or using parked domains; tests honest abstention without hallucination.
+  7. *Missing Information*: Entities exempt from statutory accounts (e.g. ENK); ensures missing data is preserved as `None` (never zero).
+  8. *Changed Information*: Entities with modified corporate names or legal forms; validates refresh and change detection.
+  9. *External Non-Target Companies*: Foreign entities and third-party directory listings; verifies rejection of out-of-scope entities.
+- **Coverage Evaluation (`evaluate_coverage`)**:
+  - Measures total cases evaluated, usable results, and usable result rate.
+  - Provides field-level coverage across `organisation_number`, `name`, `website`, `financials`, and `leadership`.
+  - Strictly distinguishes:
+    - *Missing data*: Permitted absence in ground truth (e.g. legally exempt sole proprietorship).
+    - *Failed retrieval*: Network or fetch failure where data was expected.
+    - *Incorrect result*: Extracted data conflicting with ground truth.
+- **Exact-Company Precision (`evaluate_exact_precision`)**:
+  - Measures whether the selected entity is the intended company.
+  - Covers legal name matches, aliases, subsidiaries, similarly named entities, and conflicting identity signals.
+  - Computes precision, recall, and F1 score while tracking true negatives on ambiguous/rejected queries.
+- **External Precision (`evaluate_external_precision`)**:
+  - Validates that discovered external URLs, domains, and sources belong strictly to the target company.
+  - Tracks true external matches against false positives (e.g., unrelated domains or foreign entities).
+- **Bounded Recall (`evaluate_recall`)**:
+  - Evaluates discovery of all expected verifiable fields and leadership entities.
+  - *Explicit Evaluation Boundary*: Recall is bounded to the statutory Norwegian registry (Brønnøysundregistrene) and official company domains discovered via deterministic domain matching. Ground truth is never fabricated.
+- **Evidence Validity (`evaluate_evidence_validity`)**:
+  - Validates all citations and provenance claims:
+    - URL syntax (valid HTTP/HTTPS scheme and domain format).
+    - Source type classification (`registry`, `financials`, `roles`, `website`, `external_research`, `filings`).
+    - Provenance completeness (valid `retrieved_at` timestamp and cryptographic `content_sha256` hash).
+    - Computes `validity_rate` and records invalid items with specific diagnostic reasons.
+- **Refresh Correctness (`evaluate_refresh_correctness`)**:
+  - Deterministically evaluates refresh transitions across `UNCHANGED`, `MODIFIED`, `ADDED`, `REMOVED`, and `FAILED_REFRESH`.
+  - Verifies failed-refresh preservation: fetch failures never emit false removals.
+  - Verifies that formatting, whitespace, dictionary key ordering, and timestamp differences are rejected as noise.
+- **False-Change Rate (`calculate_false_change_rate`)**:
+  - Employs semantic normalization (`is_material_change`, `normalize_semantic_value`) to isolate genuine material changes from noise.
+  - Reports total detected changes, true material changes, false changes, and `false_change_rate`.
+- **Runtime Instrumentation (`RuntimeStats`, `EvaluationInstrumentation`)**:
+  - Uses `time.monotonic()` timing so instrumentation never alters business logic.
+  - Tracks per-stage runtime, per-engine runtime, average latency, P50 latency, P95 latency, and slowest operations.
+- **Request Telemetry (`RequestStats`)**:
+  - Instruments network requests: total requests, requests per case, requests per engine, failed requests, retries, and duplicate requests.
+  - Detects duplicate URL calls for caching optimization.
+- **Provider-Aware Cost Model (`CostModelConfig`, `CostStats`)**:
+  - Configurable pricing for HTTP requests, prompt tokens, and completion tokens.
+  - Never invents provider pricing; reports unconfigured usage as explicit unknown cost items.
+- **Automated Bottleneck Analysis (`analyze_bottlenecks`)**:
+  - Automatically identifies runtime bottlenecks (engines consuming ≥ 40% time or P95 ≥ 1.0s).
+  - Flags high-request engines (≥ 50% request volume) and duplicate network requests.
+  - Surfaces high failure rates and cost drivers with actionable optimization recommendations based on measured data.
+- **Evaluation Reports (`EvaluationReport`)**:
+  - Machine-readable dictionary output (`to_dict()`).
+  - Human-readable GitHub-flavored markdown output (`to_markdown()`) with executive summary tables, telemetry metrics, and per-case breakdowns.
 
 ## Coverage limits
 

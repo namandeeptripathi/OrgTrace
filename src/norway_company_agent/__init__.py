@@ -139,5 +139,38 @@ from .batch_engine import (
     iter_company_inputs,
     validate_manifest,
 )
+from .evaluation_dataset import (
+    CaseCategory,
+    EvaluationCase,
+    ExpectedOutcome,
+    build_deterministic_evaluation_dataset,
+)
+from .evaluation import (
+    BottleneckObservation,
+    CaseEvaluationResult,
+    CostModelConfig,
+    CostStats,
+    CoverageMetrics,
+    EvaluationHarness,
+    EvaluationInstrumentation,
+    EvaluationReport,
+    EvidenceValidityMetrics,
+    ExternalPrecisionMetrics,
+    FalseChangeMetrics,
+    FieldCoverageMetrics,
+    PrecisionMetrics,
+    RecallMetrics,
+    RefreshCorrectnessMetrics,
+    RequestStats,
+    RuntimeStats,
+    analyze_bottlenecks,
+    calculate_false_change_rate,
+    evaluate_coverage,
+    evaluate_evidence_validity,
+    evaluate_exact_precision,
+    evaluate_external_precision,
+    evaluate_recall,
+    evaluate_refresh_correctness,
+)
 
 

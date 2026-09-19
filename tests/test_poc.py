@@ -169,6 +169,39 @@ from norway_company_agent.batch_engine import (  # noqa: E402
     iter_company_inputs,
     validate_manifest,
 )
+from norway_company_agent.evaluation_dataset import (  # noqa: E402
+    CaseCategory,
+    EvaluationCase,
+    ExpectedOutcome,
+    build_deterministic_evaluation_dataset,
+)
+from norway_company_agent.evaluation import (  # noqa: E402
+    BottleneckObservation,
+    CaseEvaluationResult,
+    CostModelConfig,
+    CostStats,
+    CoverageMetrics,
+    EvaluationHarness,
+    EvaluationInstrumentation,
+    EvaluationReport,
+    EvidenceValidityMetrics,
+    ExternalPrecisionMetrics,
+    FalseChangeMetrics,
+    FieldCoverageMetrics,
+    PrecisionMetrics,
+    RecallMetrics,
+    RefreshCorrectnessMetrics,
+    RequestStats,
+    RuntimeStats,
+    analyze_bottlenecks,
+    calculate_false_change_rate,
+    evaluate_coverage,
+    evaluate_evidence_validity,
+    evaluate_exact_precision,
+    evaluate_external_precision,
+    evaluate_recall,
+    evaluate_refresh_correctness,
+)
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
@@ -4441,6 +4474,535 @@ class Stage9CompetitionBatchTests(unittest.TestCase):
         fp1 = compute_output_fingerprint(r1)
         fp2 = compute_output_fingerprint(r2)
         self.assertEqual(fp1, fp2)
+
+
+class Stage10EvaluationOptimizationTests(unittest.TestCase):
+    """Stage 10: Evaluation & Optimization tests."""
+
+    def test_deterministic_evaluation_dataset_structure(self):
+        dataset = build_deterministic_evaluation_dataset()
+        self.assertEqual(len(dataset), 9)
+
+        # Check all 9 categories represented
+        categories = {case.category for case in dataset}
+        expected_cats = {
+            CaseCategory.EXACT_COMPANY,
+            CaseCategory.AMBIGUOUS_NAME,
+            CaseCategory.SUBSIDIARY,
+            CaseCategory.PARENT_COMPANY,
+            CaseCategory.SIMILARLY_NAMED,
+            CaseCategory.WEAK_WEB_PRESENCE,
+            CaseCategory.MISSING_INFORMATION,
+            CaseCategory.CHANGED_INFORMATION,
+            CaseCategory.EXTERNAL_NON_TARGET,
+        }
+        self.assertEqual(categories, expected_cats)
+
+        # Check serialization
+        case_dict = dataset[0].to_dict()
+        self.assertEqual(case_dict["case_id"], "case-01-exact")
+        self.assertEqual(case_dict["category"], "exact_company")
+        self.assertIn("ground_truth", case_dict)
+        self.assertEqual(case_dict["ground_truth"]["expected_org_number"], "923609016")
+
+    def test_coverage_calculation_distinguishes_missing_failed_and_incorrect(self):
+        cases = build_deterministic_evaluation_dataset()
+        # Simulate partial results
+        results = [
+            # Case 1: Present and correct
+            {
+                "case_id": "case-01-exact",
+                "organisation_number": "923609016",
+                "name": "Norsk Fiskeeksport AS",
+                "website": "https://norskfiske.no",
+                "financials": {"revenue": 150000000.0, "has_accounts": True},
+                "leadership": ["Kari Nordmann"],
+                "status": "usable",
+            },
+            # Case 6: Weak web presence - website is allowed to be missing
+            {
+                "case_id": "case-06-weak-web",
+                "organisation_number": "933444555",
+                "name": "Vestland Stillasmontering ENK",
+                "website": None,
+                "financials": None,
+                "leadership": [],
+                "status": "usable",
+            },
+            # Case 7: Missing info - financials allowed to be missing (None, never zero)
+            {
+                "case_id": "case-07-missing-info",
+                "organisation_number": "944555666",
+                "name": "Nordic Design Studio Ola Nordmann",
+                "website": None,
+                "financials": None,
+                "leadership": [],
+                "status": "usable",
+            },
+            # Case 5: Incorrect result (name hallucinated or wrong org)
+            {
+                "case_id": "case-05-similarly-named",
+                "organisation_number": "999111222",
+                "name": "Wrong Name AS",
+                "website": "https://hallucinated.no",
+                "financials": {"revenue": 100.0},
+                "leadership": [],
+                "status": "usable",
+            },
+            # Case 2: Failed retrieval / error
+            {
+                "case_id": "case-02-ambiguous",
+                "status": "failed",
+                "error_message": "Network timeout",
+            },
+        ]
+
+        test_cases = [c for c in cases if c.case_id in {r["case_id"] for r in results}]
+        coverage = evaluate_coverage(test_cases, results)
+        self.assertEqual(coverage.total_cases, 5)
+        self.assertEqual(coverage.usable_results, 4)
+        self.assertAlmostEqual(coverage.usable_result_rate, 4 / 5)
+        self.assertIn("case-02-ambiguous", coverage.unusable_cases)
+
+        fc = coverage.field_coverage
+        self.assertGreater(fc.total_fields_evaluated, 0)
+        self.assertGreater(fc.fields_present, 0)
+        self.assertGreater(fc.fields_missing_allowed, 0)
+        self.assertGreater(fc.fields_retrieval_failed, 0)
+        self.assertGreater(fc.fields_incorrect, 0)
+
+    def test_exact_company_precision_and_abstentions(self):
+        cases = build_deterministic_evaluation_dataset()
+        results = [
+            # Case 1: True Positive (exact match)
+            {
+                "case_id": "case-01-exact",
+                "organisation_number": "923609016",
+                "name": "Norsk Fiskeeksport AS",
+                "verdict_status": "verified",
+            },
+            # Case 2: True Negative (ambiguous properly abstained)
+            {
+                "case_id": "case-02-ambiguous",
+                "organisation_number": None,
+                "name": None,
+                "verdict_status": "ambiguous",
+            },
+            # Case 3: True Positive (subsidiary)
+            {
+                "case_id": "case-03-subsidiary",
+                "organisation_number": "912345678",
+                "name": "Fjord Laks Drift AS",
+                "verdict_status": "verified",
+            },
+            # Case 5: True Negative (similarly named rejected)
+            {
+                "case_id": "case-05-similarly-named",
+                "organisation_number": "999111222",
+                "name": "Norsk Fiskeimport AS",
+                "verdict_status": "verified",  # Target query had this org, so verified is expected
+            },
+            # Case 9: True Negative (external non-target rejected)
+            {
+                "case_id": "case-09-non-target",
+                "organisation_number": None,
+                "verdict_status": "rejected",
+            },
+        ]
+
+        test_cases = [c for c in cases if c.case_id in {r["case_id"] for r in results}]
+        precision_res = evaluate_exact_precision(test_cases, results)
+
+        self.assertEqual(precision_res.false_positives, 0)
+        self.assertEqual(precision_res.precision, 1.0)
+        self.assertGreater(precision_res.true_positives, 0)
+        self.assertGreater(precision_res.true_negatives, 0)
+
+        # Inject False Positive
+        bad_results = copy.deepcopy(results)
+        bad_results[1] = {
+            "case_id": "case-02-ambiguous",
+            "organisation_number": "999888777",
+            "verdict_status": "verified",  # Hallucinated verification on ambiguous name
+        }
+        bad_prec = evaluate_exact_precision(test_cases, bad_results)
+        self.assertGreater(bad_prec.false_positives, 0)
+        self.assertLess(bad_prec.precision, 1.0)
+
+    def test_external_precision_and_unrelated_domains(self):
+        cases = [
+            EvaluationCase(
+                case_id="c1",
+                category=CaseCategory.EXACT_COMPANY,
+                description="Target company",
+                input_query={"name": "Alpha AS"},
+                ground_truth=ExpectedOutcome(
+                    expected_org_number="911111111",
+                    expected_name="Alpha AS",
+                    expected_verdict_status="verified",
+                    should_publish_website=True,
+                    expected_website="https://alpha.no",
+                ),
+            ),
+            EvaluationCase(
+                case_id="c2",
+                category=CaseCategory.EXTERNAL_NON_TARGET,
+                description="Foreign non-target",
+                input_query={"name": "Swedish Alpha AB"},
+                ground_truth=ExpectedOutcome(
+                    expected_org_number=None,
+                    expected_name=None,
+                    expected_verdict_status="rejected",
+                    is_external_target=False,
+                    should_publish_website=False,
+                ),
+            ),
+        ]
+
+        # Valid run: matches expected website and rejects foreign
+        good_results = [
+            {"case_id": "c1", "website": "https://alpha.no", "verdict_status": "verified"},
+            {"case_id": "c2", "website": None, "verdict_status": "rejected"},
+        ]
+        ep_good = evaluate_external_precision(cases, good_results)
+        self.assertEqual(ep_good.precision, 1.0)
+        self.assertEqual(ep_good.false_external_positives, 0)
+
+        # Bad run: discovers unrelated domain and fails to reject non-target
+        bad_results = [
+            {"case_id": "c1", "website": "https://competitor.com", "verdict_status": "verified"},
+            {"case_id": "c2", "website": "https://swedish-alpha.se", "verdict_status": "verified"},
+        ]
+        ep_bad = evaluate_external_precision(cases, bad_results)
+        self.assertEqual(ep_bad.true_external_matches, 0)
+        self.assertEqual(ep_bad.false_external_positives, 3)
+        self.assertEqual(ep_bad.precision, 0.0)
+        self.assertEqual(len(ep_bad.unrelated_domains_detected), 3)
+
+    def test_recall_and_boundary_documentation(self):
+        cases = build_deterministic_evaluation_dataset()
+        # Simulate results with 1 missing leadership member
+        results = []
+        for c in cases:
+            gt = c.ground_truth
+            results.append({
+                "case_id": c.case_id,
+                "organisation_number": gt.expected_org_number,
+                "website": gt.expected_website if gt.should_publish_website else None,
+                "financials": {"revenue": gt.expected_financial_revenue} if gt.should_have_financials else None,
+                "leadership": gt.expected_leadership[:1] if len(gt.expected_leadership) > 1 else list(gt.expected_leadership),
+            })
+
+        recall = evaluate_recall(cases, results)
+        self.assertGreater(recall.total_expected_items, 0)
+        self.assertGreaterEqual(recall.recall_rate, 0.90)
+        self.assertIn("statutory registry", recall.boundary_documentation)
+
+    def test_evidence_validity_and_provenance(self):
+        evidence_list = [
+            # 1. Valid registry evidence
+            {
+                "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/923609016",
+                "source_type": "registry",
+                "retrieved_at": "2026-09-20T00:00:00Z",
+                "content_sha256": "a" * 64,
+            },
+            # 2. Valid website evidence
+            {
+                "source_url": "https://norskfiske.no",
+                "source_type": "website",
+                "retrieved_at": "2026-09-20T00:00:00Z",
+                "content_sha256": "b" * 64,
+            },
+            # 3. Invalid URL (malformed scheme)
+            {
+                "source_url": "ftp://broken-source",
+                "source_type": "registry",
+                "retrieved_at": "2026-09-20T00:00:00Z",
+                "content_sha256": "c" * 64,
+            },
+            # 4. Missing provenance (no content_sha256)
+            {
+                "source_url": "https://data.brreg.no/regnskap/923609016",
+                "source_type": "financials",
+                "retrieved_at": "2026-09-20T00:00:00Z",
+                "content_sha256": None,
+            },
+        ]
+
+        metrics = evaluate_evidence_validity(evidence_list)
+        self.assertEqual(metrics.total_evidence_items, 4)
+        self.assertEqual(metrics.valid_syntax_urls, 3)
+        self.assertEqual(metrics.valid_source_types, 4)
+        self.assertEqual(metrics.provenance_complete, 3)
+        self.assertEqual(len(metrics.invalid_evidence_items), 2)
+        self.assertEqual(metrics.validity_rate, 0.5)
+
+    def test_refresh_correctness_and_failed_refresh_preservation(self):
+        cases = [
+            EvaluationCase(
+                case_id="case-unchanged",
+                category=CaseCategory.EXACT_COMPANY,
+                description="Unchanged company",
+                input_query={"organisation_number": "923609016"},
+                ground_truth=ExpectedOutcome(
+                    expected_org_number="923609016",
+                    expected_name="Norsk Fiskeeksport AS",
+                    expected_verdict_status="verified",
+                    expected_changes=[],  # UNCHANGED
+                ),
+            ),
+            EvaluationCase(
+                case_id="case-modified",
+                category=CaseCategory.CHANGED_INFORMATION,
+                description="Modified name",
+                input_query={"organisation_number": "955666777"},
+                ground_truth=ExpectedOutcome(
+                    expected_org_number="955666777",
+                    expected_name="Bergen Teknologi ASA",
+                    expected_verdict_status="verified",
+                    expected_changes=["legal_name"],  # MODIFIED
+                ),
+            ),
+            EvaluationCase(
+                case_id="case-failed-fetch",
+                category=CaseCategory.EXACT_COMPANY,
+                description="Network failure on refresh",
+                input_query={"organisation_number": "912345678"},
+                ground_truth=ExpectedOutcome(
+                    expected_org_number="912345678",
+                    expected_name="Fjord Laks AS",
+                    expected_verdict_status="verified",
+                ),
+            ),
+        ]
+
+        refresh_results = [
+            # 1. Correctly unchanged: 0 changes
+            {"case_id": "case-unchanged", "status": "success", "changes": []},
+            # 2. Correctly modified: legal_name changed
+            {
+                "case_id": "case-modified",
+                "status": "success",
+                "changes": [{"field_name": "legal_name", "change_type": "modified"}],
+            },
+            # 3. Failed refresh preservation: status failed_fetch, 0 removals
+            {"case_id": "case-failed-fetch", "status": "failed_fetch", "changes": []},
+        ]
+
+        ref_metrics = evaluate_refresh_correctness(cases, refresh_results)
+        self.assertEqual(ref_metrics.total_refresh_comparisons, 3)
+        self.assertEqual(ref_metrics.correctly_unchanged, 1)
+        self.assertEqual(ref_metrics.correctly_modified, 1)
+        self.assertEqual(ref_metrics.correctly_preserved_failures, 1)
+        self.assertEqual(ref_metrics.accuracy, 1.0)
+
+    def test_false_change_rate_with_semantic_normalization(self):
+        detected_changes = [
+            # Genuine change
+            {
+                "field_name": "legal_name",
+                "previous_value": "Bergen Teknologi AS",
+                "current_value": "Bergen Teknologi ASA",
+            },
+            # False change: whitespace noise
+            {
+                "field_name": "municipality",
+                "previous_value": "Bergen",
+                "current_value": "  Bergen  ",
+            },
+            # False change: case noise on case-insensitive field
+            {
+                "field_name": "legal_form",
+                "previous_value": "AS",
+                "current_value": "as",
+            },
+            # False change: not in ground truth
+            {
+                "field_name": "unknown_noise_field",
+                "previous_value": "foo",
+                "current_value": "bar",
+            },
+        ]
+
+        ground_truth_changes = {"legal_name"}
+        fcm = calculate_false_change_rate(detected_changes, ground_truth_changes)
+
+        self.assertEqual(fcm.total_detected_changes, 4)
+        self.assertEqual(fcm.true_material_changes, 1)
+        self.assertEqual(fcm.false_changes, 3)
+        self.assertAlmostEqual(fcm.false_change_rate, 0.75)
+        self.assertEqual(len(fcm.false_change_details), 3)
+
+    def test_runtime_instrumentation_monotonic(self):
+        inst = EvaluationInstrumentation()
+
+        with inst.measure_operation("identity_engine", "lookup_brreg", stage="identity"):
+            time.sleep(0.01)
+
+        with inst.measure_operation("website_discovery", "crawl_homepage", stage="discovery"):
+            time.sleep(0.01)
+
+        runtime = inst.get_runtime_stats()
+        self.assertGreater(runtime.total_runtime_seconds, 0.01)
+        self.assertIn("identity", runtime.stage_runtimes)
+        self.assertIn("discovery", runtime.stage_runtimes)
+        self.assertIn("identity_engine", runtime.engine_runtimes)
+        self.assertIn("website_discovery", runtime.engine_runtimes)
+        self.assertGreater(runtime.avg_latency_seconds, 0.0)
+        self.assertGreater(runtime.p50_latency_seconds, 0.0)
+        self.assertGreater(runtime.max_latency_seconds, 0.0)
+        self.assertGreater(len(runtime.slowest_operations), 0)
+
+    def test_request_counting_and_duplicate_detection(self):
+        inst = EvaluationInstrumentation()
+
+        url_1 = "https://data.brreg.no/enhetsregisteret/api/enheter/923609016"
+        url_2 = "https://norskfiske.no"
+
+        # Record requests
+        inst.record_request("identity_engine", url_1, case_id="c1", method="GET", status_code=200)
+        # Duplicate request to url_1
+        inst.record_request("identity_engine", url_1, case_id="c1", method="GET", status_code=200)
+        # Request to url_2
+        inst.record_request("website_discovery", url_2, case_id="c1", method="GET", status_code=200)
+        # Failed request and retry
+        inst.record_request("website_discovery", "https://timeout.test", case_id="c1", method="GET", status_code=504, is_failed=True)
+        inst.record_request("website_discovery", "https://timeout.test", case_id="c1", method="GET", status_code=200, is_retry=True)
+
+        reqs = inst.get_request_stats()
+        self.assertEqual(reqs.total_requests, 5)
+        self.assertEqual(reqs.requests_per_engine["identity_engine"], 2)
+        self.assertEqual(reqs.requests_per_engine["website_discovery"], 3)
+        self.assertEqual(reqs.duplicate_requests, 2)  # url_1 duplicate + timeout.test duplicate
+        self.assertIn(url_1, reqs.duplicate_urls)
+        self.assertEqual(reqs.failed_requests, 1)
+        self.assertEqual(reqs.retries, 1)
+
+    def test_cost_model_configured_and_unknown(self):
+        # 1. Configured pricing
+        config = CostModelConfig(
+            cost_per_request=0.005,
+            cost_per_1k_prompt_tokens=0.0015,
+            cost_per_1k_completion_tokens=0.002,
+            currency="USD",
+            is_pricing_configured=True,
+        )
+        inst = EvaluationInstrumentation(cost_config=config)
+        inst.record_request("identity_engine", "https://brreg.no/api/1")
+        inst.record_request("identity_engine", "https://brreg.no/api/2")
+        inst.record_tokens(1000, 500)
+
+        cost = inst.get_cost_stats()
+        self.assertTrue(cost.is_pricing_configured)
+        self.assertEqual(cost.total_requests, 2)
+        self.assertEqual(cost.prompt_tokens, 1000)
+        self.assertEqual(cost.completion_tokens, 500)
+        self.assertEqual(cost.total_tokens, 1500)
+
+        # Expected: 2 * 0.005 + (1 * 0.0015) + (0.5 * 0.002) = 0.01 + 0.0015 + 0.0010 = 0.0125
+        self.assertAlmostEqual(cost.estimated_cost, 0.0125)
+
+        # 2. Unconfigured pricing
+        inst_unconfigured = EvaluationInstrumentation()
+        inst_unconfigured.record_request("identity_engine", "https://brreg.no/api/1")
+        inst_unconfigured.record_tokens(500, 200)
+
+        cost_unc = inst_unconfigured.get_cost_stats()
+        self.assertFalse(cost_unc.is_pricing_configured)
+        self.assertEqual(cost_unc.estimated_cost, 0.0)
+        self.assertGreater(len(cost_unc.unknown_cost_items), 0)
+
+    def test_bottleneck_analysis_actionable_observations(self):
+        runtime_stats = RuntimeStats(
+            total_runtime_seconds=10.0,
+            engine_runtimes={"slow_crawler": 6.5, "fast_registry": 3.5},  # 65% of time
+            p95_latency_seconds=1.5,
+        )
+        request_stats = RequestStats(
+            total_requests=100,
+            requests_per_engine={"slow_crawler": 80, "fast_registry": 20},  # 80% of requests
+            failed_requests=5,
+            duplicate_requests=12,
+            duplicate_urls=["https://dup.test"],
+        )
+        cost_stats = CostStats(
+            total_requests=100,
+            is_pricing_configured=True,
+            estimated_cost=2.50,
+        )
+
+        bottlenecks = analyze_bottlenecks(runtime_stats, request_stats, cost_stats)
+        self.assertGreater(len(bottlenecks), 0)
+
+        categories = {b.category for b in bottlenecks}
+        self.assertIn("runtime", categories)
+        self.assertIn("request_volume", categories)
+        self.assertIn("duplicate_requests", categories)
+        self.assertIn("failure_rate", categories)
+        self.assertIn("cost", categories)
+
+        for b in bottlenecks:
+            self.assertIn(b.severity, {"high", "medium", "low", "info"})
+            self.assertTrue(len(b.message) > 0)
+            self.assertTrue(len(b.actionable_recommendation) > 0)
+
+    def test_evaluation_report_markdown_and_dict(self):
+        harness = EvaluationHarness()
+        report = harness.run()
+
+        # Test dict output
+        d = report.to_dict()
+        self.assertIn("timestamp", d)
+        self.assertEqual(d["dataset_version"], "1.0.0")
+        self.assertEqual(d["total_cases"], 9)
+        self.assertIn("coverage", d)
+        self.assertIn("exact_precision", d)
+        self.assertIn("runtime", d)
+        self.assertIn("case_results", d)
+
+        # Test markdown output
+        md = report.to_markdown()
+        self.assertIn("# OrgTrace Stage 10 Evaluation & Optimization Benchmark Report", md)
+        self.assertIn("Executive Summary Metrics", md)
+        self.assertIn("Runtime & Resource Telemetry", md)
+        self.assertIn("Per-Case Evaluation Details", md)
+        self.assertIn("case-01-exact", md)
+        self.assertIn("✅ Pass", md)
+
+    def test_evaluation_harness_end_to_end_deterministic(self):
+        harness = EvaluationHarness()
+        report = harness.run()
+
+        self.assertEqual(report.total_cases, 9)
+        self.assertEqual(report.passed_cases, 9)
+        self.assertEqual(report.overall_accuracy, 1.0)
+        self.assertEqual(report.exact_precision.precision, 1.0)
+        self.assertEqual(report.external_precision.precision, 1.0)
+        self.assertEqual(report.evidence_validity.validity_rate, 1.0)
+        self.assertEqual(report.refresh_correctness.accuracy, 1.0)
+        self.assertEqual(report.false_change.false_change_rate, 0.0)
+
+    def test_empty_dataset_edge_cases(self):
+        empty_cov = evaluate_coverage([], [])
+        self.assertEqual(empty_cov.total_cases, 0)
+        self.assertEqual(empty_cov.usable_result_rate, 0.0)
+
+        empty_prec = evaluate_exact_precision([], [])
+        self.assertEqual(empty_prec.total_evaluations, 0)
+        self.assertEqual(empty_prec.precision, 1.0)
+
+        empty_ext = evaluate_external_precision([], [])
+        self.assertEqual(empty_ext.total_external_evaluations, 0)
+        self.assertEqual(empty_ext.precision, 1.0)
+
+        empty_ev = evaluate_evidence_validity([])
+        self.assertEqual(empty_ev.total_evidence_items, 0)
+        self.assertEqual(empty_ev.validity_rate, 1.0)
+
+        empty_fc = calculate_false_change_rate([], set())
+        self.assertEqual(empty_fc.total_detected_changes, 0)
+        self.assertEqual(empty_fc.false_change_rate, 0.0)
 
 
 if __name__ == "__main__":
