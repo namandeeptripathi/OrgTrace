@@ -17,6 +17,33 @@ The bulk snapshot and live API are compared by exact organisation number. A 410 
 cached copy must be removed. Person data is only used in the company-centric role context; birth dates
 are not stored or displayed.
 
+## Stage 1 — Exact Company Identity Engine
+
+The Stage 1 identity engine (`norway_company_agent.identity_engine`) establishes BRREG as the single authoritative source of Norwegian corporate identity:
+- **Organisation Numbers**: Strict canonicalization to 9-digit strings. Handles spaces, dots, dashes, "NO" prefixes, "MVA" suffixes, and "org.nr" markers. Validates Modulo 11 check digits using official Norwegian weights `(3, 2, 7, 6, 5, 4, 3, 2)`.
+- **Legal Names**: Deterministic matching with normalization for case, whitespace, punctuation, Unicode/diacritics (`æ`, `ø`, `å`), and legal form suffixes (`AS`, `ASA`, `ENK`, `DA`, `ANS`, `NUF`, `SA`, `KS`, etc.). Rejects blind fuzzy matching and flags incompatible legal form conflicts (e.g. `AS` vs `ASA`).
+- **Domain & Entity Matching**: Five explicit categories: `exact`, `normalized`, `related_derived` (subdomains, ccTLDs, name-derived domains), `conflicting`, and `unavailable`.
+- **Corporate Groups**: Parent companies (`morselskap`), subsidiaries (`datterselskaper`), subunits (`underenheter`), and sister entities are classified via BRREG group and subunit data without ever being conflated as the same legal entity.
+- **Ambiguity & Wrong-Company Rejection**: Multiple plausible BRREG matches trigger explicit `ambiguous` verdicts. Conflicting org numbers, incompatible legal forms, or conflicting domains trigger explicit `rejected` verdicts with structured evidence.
+- **Identity Evidence**: Produces deterministic `IdentityVerdict` objects containing structured evidence items, explicit reasons, confidence levels (`high`, `medium`, `low`, `none`), and boolean diagnostic flags.
+
+## Stage 2 — Deterministic Website Discovery
+
+
+The Stage 2 discovery pipeline (`norway_company_agent.website_discovery`) finds the official website for a legally identified company without guessing:
+- **Registry Website Anchor**: Uses the Stage 1 BRREG entity record as the primary anchor. Normalizes and validates URLs against SSRF policies.
+- **Sitemap Discovery**: Safely discovers and parses `robots.txt` and `sitemap.xml` / sitemap indexes. Filters for high-signal paths (`about`, `om-oss`, `contact`, `kontakt`, `legal`) while excluding media and binary assets.
+- **Homepage Discovery**: Resolves candidate domains to their homepages with scheme, host, path, port, and trailing slash normalization. Follows redirects safely with per-hop SSRF validation.
+- **Search Candidate Discovery**: Engaged only when registry/sitemap evidence is missing or insufficient. Employs deterministic query construction (`"{name}" {org} {municipality}`) with bounded results and blocked-host filtering (`proff.no`, `purehelp.no`, social platforms, etc.).
+- **Candidate Scoring**: Explainable, deterministic scoring model combining exact org number presence (+0.75), distinctive legal name tokens in title (+0.45) or snippet (+0.25), hostname alignment (+0.30), municipality match (+0.10), and provenance weighting.
+- **Bounded Candidate Crawling**: Crawls strictly bounded pages (homepage + up to 2–3 priority pages). Deduplicates URLs and enforces page/depth caps.
+- **Exact-Entity Verification**: Evaluates strong identifiers (exact 9-digit org number on page/footer, exact legal name in title/imprint), medium identifiers (all name tokens in homepage + municipality match), and weak identifiers. Rejects parked domains, placeholder pages, and conflicting org numbers.
+- **Safe Abstention**: Returns `ABSTAIN` whenever evidence is insufficient, conflicting, or budget is exhausted. Never forces a candidate merely for having the highest score.
+- **SSRF & Security Controls**: Every outbound request is protected by `assert_public_url`, blocking loopback, link-local, private/internal IP ranges, and unsafe schemes. Respects `robots.txt` and fails closed on unsafe resolution.
+- **Request-Budget Accounting**: Explicitly tracks total, search, robots, sitemap, page, redirect, and failed requests against configured caps (`RequestBudget`).
+
+
+
 ## Coverage limits
 
 - Public annual accounts do not exist for every registered entity. AS and ASA generally file; many sole

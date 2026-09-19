@@ -5,6 +5,30 @@ import unicodedata
 import urllib.parse
 from typing import Any
 
+from .identity_engine import (
+    DomainMatch,
+    DomainMatchCategory,
+    GroupRelationship,
+    GroupRelationType,
+    IdentityConfidence,
+    IdentityEvidence,
+    IdentityVerdict,
+    IdentityVerdictStatus,
+    LegalNameMatch,
+    LegalNameMatchCategory,
+    OrgNumberValidation,
+    assess_company_identity,
+    canonicalize_org_number,
+    classify_group_relationship,
+    compute_mod11_check_digit,
+    detect_ambiguity,
+    extract_legal_form,
+    is_valid_org_mod11,
+    match_domain_entity,
+    match_legal_names,
+    normalize_legal_name,
+    validate_org_number,
+)
 
 LEGAL_AND_GENERIC = {
     "as", "asa", "ans", "da", "enk", "iks", "sa", "sam", "sti", "stiftelsen",

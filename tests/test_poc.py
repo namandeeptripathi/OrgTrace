@@ -27,6 +27,47 @@ from norway_company_agent.external_footprint import aggregate_footprint, publish
 from norway_company_agent.external_tasks import plan_external_tasks  # noqa: E402
 from norway_company_agent.external_control import development_score, run_company_control, strategy_order  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate, assess_social_identity, assess_website_identity  # noqa: E402
+from norway_company_agent.identity_engine import (  # noqa: E402
+    DomainMatch,
+    DomainMatchCategory,
+    GroupRelationship,
+    GroupRelationType,
+    IdentityConfidence,
+    IdentityEvidence,
+    IdentityVerdict,
+    IdentityVerdictStatus,
+    LegalNameMatch,
+    LegalNameMatchCategory,
+    OrgNumberValidation,
+    assess_company_identity,
+    canonicalize_org_number,
+    classify_group_relationship,
+    compute_mod11_check_digit,
+    detect_ambiguity,
+    extract_legal_form,
+    is_valid_org_mod11,
+    match_domain_entity,
+    match_legal_names,
+    normalize_legal_name,
+    validate_org_number,
+)
+from norway_company_agent.website_discovery import (  # noqa: E402
+    CandidateScore,
+    DiscoveryVerdictStatus,
+    FetchResult as DiscoveryFetchResult,
+    RequestBudget,
+    SafeHttpFetcher,
+    SearchCandidate,
+    VerificationEvidenceLevel,
+    VerificationItem,
+    WebsiteDiscoveryResult,
+    discover_company_website,
+    discover_search_candidates,
+    discover_sitemap_urls,
+    parse_sitemap_xml,
+    score_candidate,
+    verify_exact_entity,
+)
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
@@ -1518,5 +1559,713 @@ class CompetitionBatchDiscoveryTests(unittest.TestCase):
         self.assertIn("crawl-candidate gate", profile["evidence"]["website"]["note"])
 
 
+class Stage1IdentityEngineTests(unittest.TestCase):
+    """Stage 1: Exact Company Identity Engine tests."""
+
+    def test_valid_org_numbers(self):
+        # Known valid Norwegian organisation numbers (Modulo 11 valid)
+        valid_orgs = ["923609016", "915637353"]
+        for org in valid_orgs:
+            self.assertEqual(canonicalize_org_number(org), org)
+            self.assertEqual(canonicalize_org_number(org, verify_checksum=True), org)
+            res = validate_org_number(org, verify_checksum=True)
+            self.assertTrue(res.is_valid)
+            self.assertTrue(res.has_valid_checksum)
+            self.assertEqual(res.canonical, org)
+            self.assertIsNone(res.error)
+            self.assertTrue(is_valid_org_mod11(org))
+            self.assertEqual(compute_mod11_check_digit(org[:8]), int(org[8]))
+
+    def test_malformed_org_numbers(self):
+        # 8 digits (too short)
+        self.assertIsNone(canonicalize_org_number("12345678"))
+        res_short = validate_org_number("12345678")
+        self.assertFalse(res_short.is_valid)
+        self.assertIn("Invalid length", res_short.error or "")
+
+        # 10 digits (too long)
+        self.assertIsNone(canonicalize_org_number("1234567890"))
+        res_long = validate_org_number("1234567890")
+        self.assertFalse(res_long.is_valid)
+        self.assertIn("Invalid length", res_long.error or "")
+
+        # Non-digits
+        self.assertIsNone(canonicalize_org_number("ABCDEFGHI"))
+        res_alpha = validate_org_number("ABCDEFGHI")
+        self.assertFalse(res_alpha.is_valid)
+        self.assertIn("invalid characters", res_alpha.error or "")
+
+        # Empty / None
+        self.assertIsNone(canonicalize_org_number(""))
+        self.assertIsNone(canonicalize_org_number(None))
+
+        # Modulo 11 failure with verify_checksum=True
+        # "123456789" has invalid check digit (check digit should be 5, not 9)
+        self.assertIsNone(canonicalize_org_number("123456789", verify_checksum=True))
+        res_mod11 = validate_org_number("123456789", verify_checksum=True)
+        self.assertFalse(res_mod11.is_valid)
+        self.assertFalse(res_mod11.has_valid_checksum)
+        self.assertIn("Invalid Modulo 11 check digit", res_mod11.error or "")
+
+        # Test check digit 10 (disallowed in Modulo 11)
+        # "11100000": 1*3 + 1*2 + 1*7 = 12 % 11 = 1 => 11 - 1 = 10 (invalid)
+        self.assertIsNone(compute_mod11_check_digit("11100000"))
+
+    def test_org_number_formatting_variations(self):
+        expected = "923609016"
+        variations = [
+            "923 609 016",
+            " 923  609  016 ",
+            "923.609.016",
+            "923-609-016",
+            "923.609-016",
+            "NO 923 609 016",
+            "NO923609016",
+            "no-923-609-016",
+            "Org.nr: 923 609 016",
+            "Organisasjonsnummer: 923609016",
+            "Foretaksregisteret 923609016",
+            "923 609 016 MVA",
+            "NO 923 609 016 MVA",
+            "923609016MVA",
+            "923 609 016 Foretaksregisteret",
+            923609016,  # int
+        ]
+        for var in variations:
+            self.assertEqual(canonicalize_org_number(var), expected, f"Failed for variation: {var!r}")
+            res = validate_org_number(var)
+            self.assertTrue(res.is_valid, f"Validation failed for: {var!r}")
+            self.assertEqual(res.canonical, expected)
+
+    def test_exact_legal_name_matches(self):
+        match1 = match_legal_names("Equinor ASA", "Equinor ASA")
+        self.assertTrue(match1.is_match)
+        self.assertEqual(match1.category, LegalNameMatchCategory.EXACT)
+        self.assertEqual(match1.target_form, "ASA")
+        self.assertEqual(match1.candidate_form, "ASA")
+
+        match2 = match_legal_names("NORSK FISKEEKSPORT AS", "norsk fiskeeksport as")
+        self.assertTrue(match2.is_match)
+        self.assertEqual(match2.category, LegalNameMatchCategory.EXACT_NORMALIZED)
+
+    def test_normalized_legal_name_matches(self):
+        # Whitespace
+        match_ws = match_legal_names("  Equinor   ASA  ", "Equinor ASA")
+        self.assertTrue(match_ws.is_match)
+
+        # Suffix punctuation: A/S vs AS, A.S. vs AS
+        match_slash = match_legal_names("Norsk Fiskeeksport A/S", "Norsk Fiskeeksport AS")
+        self.assertTrue(match_slash.is_match)
+        self.assertIn(match_slash.category, {LegalNameMatchCategory.EXACT_NORMALIZED, LegalNameMatchCategory.EXACT})
+
+        match_dot = match_legal_names("Norsk Fiskeeksport A.S.", "Norsk Fiskeeksport AS")
+        self.assertTrue(match_dot.is_match)
+
+        # Suffix omitted on one side
+        match_omitted = match_legal_names("Equinor ASA", "Equinor")
+        self.assertTrue(match_omitted.is_match)
+        self.assertEqual(match_omitted.category, LegalNameMatchCategory.LEGAL_SUFFIX_OMITTED)
+
+        # Unicode & Norwegian diacritics
+        match_nordic1 = match_legal_names("Tromsø Bygg AS", "Tromso Bygg AS")
+        self.assertTrue(match_nordic1.is_match)
+
+        match_nordic2 = match_legal_names("Blåbær Syltetøy AS", "Blabaer Syltetoy AS")
+        self.assertTrue(match_nordic2.is_match)
+
+        match_accent = match_legal_names("Café Bakeri AS", "Cafe Bakeri AS")
+        self.assertTrue(match_accent.is_match)
+
+    def test_conflicting_legal_names(self):
+        # Different distinctive tokens (partial overlap is NOT identity)
+        match_partial = match_legal_names("Acme Trading AS", "Acme Transport AS")
+        self.assertFalse(match_partial.is_match)
+        self.assertEqual(match_partial.category, LegalNameMatchCategory.PARTIAL_OVERLAP)
+
+        # Incompatible legal forms (AS vs ASA)
+        match_form_conflict = match_legal_names("Acme AS", "Acme ASA")
+        self.assertFalse(match_form_conflict.is_match)
+        self.assertEqual(match_form_conflict.category, LegalNameMatchCategory.LEGAL_FORM_CONFLICT)
+
+        # Incompatible legal forms (AS vs ENK)
+        match_form_conflict2 = match_legal_names("Hansen Bygg AS", "Hansen Bygg ENK")
+        self.assertFalse(match_form_conflict2.is_match)
+        self.assertEqual(match_form_conflict2.category, LegalNameMatchCategory.LEGAL_FORM_CONFLICT)
+
+        # Completely unrelated names
+        match_unrelated = match_legal_names("Equinor ASA", "Telenor ASA")
+        self.assertFalse(match_unrelated.is_match)
+        self.assertEqual(match_unrelated.category, LegalNameMatchCategory.CONFLICTING)
+
+    def test_exact_domain_matches(self):
+        m1 = match_domain_entity("https://equinor.com", "https://equinor.com")
+        self.assertTrue(m1.is_match)
+        self.assertEqual(m1.category, DomainMatchCategory.EXACT)
+
+        m2 = match_domain_entity("equinor.com", "equinor.com")
+        self.assertTrue(m2.is_match)
+        self.assertEqual(m2.category, DomainMatchCategory.EXACT)
+
+    def test_normalized_domain_matches(self):
+        m1 = match_domain_entity("http://www.equinor.com/", "https://equinor.com")
+        self.assertTrue(m1.is_match)
+        self.assertEqual(m1.category, DomainMatchCategory.NORMALIZED)
+
+        m2 = match_domain_entity("https://WWW.EQUINOR.COM", "equinor.com")
+        self.assertTrue(m2.is_match)
+        self.assertEqual(m2.category, DomainMatchCategory.NORMALIZED)
+
+    def test_related_derived_domains(self):
+        # Subdomain
+        m_sub = match_domain_entity("https://equinor.com", "https://careers.equinor.com")
+        self.assertTrue(m_sub.is_match)
+        self.assertEqual(m_sub.category, DomainMatchCategory.RELATED_DERIVED)
+
+        # ccTLD variant
+        m_tld = match_domain_entity("https://equinor.no", "https://equinor.com")
+        self.assertTrue(m_tld.is_match)
+        self.assertEqual(m_tld.category, DomainMatchCategory.RELATED_DERIVED)
+
+        # Name derived
+        m_name = match_domain_entity(None, "https://norsk-fiskeeksport.no", target_name="Norsk Fiskeeksport AS")
+        self.assertTrue(m_name.is_match)
+        self.assertEqual(m_name.category, DomainMatchCategory.RELATED_DERIVED)
+
+    def test_conflicting_domains(self):
+        m = match_domain_entity("https://target-company.no", "https://competitor.com", target_name="Target Company AS")
+        self.assertFalse(m.is_match)
+        self.assertEqual(m.category, DomainMatchCategory.CONFLICTING)
+
+    def test_unavailable_domains(self):
+        m1 = match_domain_entity(None, "https://equinor.com")
+        self.assertFalse(m1.is_match)
+        self.assertEqual(m1.category, DomainMatchCategory.UNAVAILABLE)
+
+        m2 = match_domain_entity("", "")
+        self.assertFalse(m2.is_match)
+        self.assertEqual(m2.category, DomainMatchCategory.UNAVAILABLE)
+
+    def test_parent_subsidiary_group_relationships(self):
+        parent_org = "915637000"
+        sub_org = "915637353"
+        sister_org = "915637999"
+
+        target_sub = {"organisation_number": sub_org, "name": "SKS Produksjon AS", "overordnetEnhet": parent_org}
+        cand_parent = {"organisation_number": parent_org, "name": "SKS AS"}
+        cand_sister = {"organisation_number": sister_org, "name": "SKS Handel AS", "overordnetEnhet": parent_org}
+
+        # Subunit to parent
+        rel_parent = classify_group_relationship(target_sub, cand_parent)
+        self.assertEqual(rel_parent.relation_type, GroupRelationType.PARENT)
+        self.assertFalse(rel_parent.is_same_legal_entity)
+
+        # Parent to subunit
+        rel_sub = classify_group_relationship(cand_parent, target_sub)
+        self.assertEqual(rel_sub.relation_type, GroupRelationType.SUBUNIT)
+        self.assertFalse(rel_sub.is_same_legal_entity)
+
+        # Sister entities sharing parent
+        rel_sister = classify_group_relationship(target_sub, cand_sister)
+        self.assertEqual(rel_sister.relation_type, GroupRelationType.SISTER_SUBSIDIARY)
+        self.assertFalse(rel_sister.is_same_legal_entity)
+
+        # Same entity
+        rel_same = classify_group_relationship(target_sub, target_sub)
+        self.assertEqual(rel_same.relation_type, GroupRelationType.SAME_ENTITY)
+        self.assertTrue(rel_same.is_same_legal_entity)
+
+        # Corporate group via group_data (konsernstruktur)
+        group_data = {
+            "morselskap": {"organisasjonsnummer": parent_org, "navn": "SKS AS"},
+            "datterselskaper": [{"organisasjonsnummer": sub_org, "navn": "SKS Produksjon AS"}],
+        }
+        rel_group_parent = classify_group_relationship(
+            {"organisation_number": sub_org, "name": "SKS Produksjon AS"},
+            {"organisation_number": parent_org, "name": "SKS AS"},
+            group_data=group_data,
+        )
+        self.assertEqual(rel_group_parent.relation_type, GroupRelationType.PARENT)
+        self.assertFalse(rel_group_parent.is_same_legal_entity)
+
+        # Assess company identity: parent entity must be explicitly rejected for exact identity
+        verdict = assess_company_identity(target_sub, cand_parent, group_data=group_data)
+        self.assertEqual(verdict.verdict, IdentityVerdictStatus.REJECTED)
+        self.assertEqual(verdict.confidence, IdentityConfidence.HIGH)
+        self.assertTrue(verdict.flags["is_parent_or_subsidiary"])
+        self.assertTrue(any("parent" in r.lower() for r in verdict.reasons))
+
+    def test_multiple_candidate_entities_and_ambiguity(self):
+        target = {"name": "Hansen Bygg AS", "organisation_number": None}
+        candidates = [
+            {"organisation_number": "912345678", "name": "Hansen Bygg AS", "municipality": "Oslo"},
+            {"organisation_number": "987654321", "name": "Hansen Bygg AS", "municipality": "Bergen"},
+        ]
+
+        is_ambig, reasons = detect_ambiguity(target, candidates)
+        self.assertTrue(is_ambig)
+        self.assertTrue(any("Multiple distinct BRREG entities" in r for r in reasons))
+
+        # When evaluated against candidate pool, verdict must be AMBIGUOUS
+        verdict = assess_company_identity(target, candidates[0], candidate_pool=candidates)
+        self.assertEqual(verdict.verdict, IdentityVerdictStatus.AMBIGUOUS)
+        self.assertEqual(verdict.confidence, IdentityConfidence.NONE)
+        self.assertTrue(verdict.flags["ambiguity_detected"])
+
+        # If target has exact org number matching one candidate, it is unambiguous
+        target_with_org = {"name": "Hansen Bygg AS", "organisation_number": "912345678"}
+        is_ambig2, _ = detect_ambiguity(target_with_org, candidates)
+        self.assertFalse(is_ambig2)
+
+    def test_wrong_company_explicit_rejection(self):
+        target = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "website": "https://norskfiske.no",
+        }
+
+        # 1. Candidate with different org number (unrelated company)
+        cand_wrong_org = {
+            "organisation_number": "987654321",
+            "name": "Annet Selskap AS",
+        }
+        v1 = assess_company_identity(target, cand_wrong_org)
+        self.assertEqual(v1.verdict, IdentityVerdictStatus.REJECTED)
+        self.assertEqual(v1.confidence, IdentityConfidence.HIGH)
+        self.assertTrue(any("does not match target org" in r for r in v1.reasons))
+
+        # 2. Candidate with conflicting legal form (AS vs ASA) and no org number
+        cand_form_conflict = {
+            "organisation_number": None,
+            "name": "Norsk Fiskeeksport ASA",
+        }
+        v2 = assess_company_identity(target, cand_form_conflict)
+        self.assertEqual(v2.verdict, IdentityVerdictStatus.REJECTED)
+        self.assertTrue(v2.flags["legal_form_conflict"])
+
+        # 3. Candidate with conflicting domain and no org number
+        cand_domain_conflict = {
+            "organisation_number": None,
+            "name": "Norsk Fiskeeksport AS",
+            "website": "https://completely-unrelated-competitor.com",
+        }
+        v3 = assess_company_identity(target, cand_domain_conflict)
+        self.assertEqual(v3.verdict, IdentityVerdictStatus.REJECTED)
+        self.assertTrue(v3.flags["domain_conflict"])
+
+    def test_missing_evidence_and_deterministic_repeated_results(self):
+        target = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "website": "https://norskfiske.no",
+        }
+
+        # Missing candidate evidence: name matches, but no org number and no domain
+        cand_bare = {"name": "Norsk Fiskeeksport AS"}
+        v_bare = assess_company_identity(target, cand_bare)
+        self.assertEqual(v_bare.verdict, IdentityVerdictStatus.UNRESOLVED)
+        self.assertEqual(v_bare.confidence, IdentityConfidence.LOW)
+
+        # Missing both org numbers and no domain
+        v_unresolved = assess_company_identity({"name": "Mystery AS"}, {"name": "Mystery AS"})
+        self.assertEqual(v_unresolved.verdict, IdentityVerdictStatus.UNRESOLVED)
+
+        # Determinism: run assess_company_identity 10 times, verify bit-for-bit identical results
+        cand_match = {
+            "organisation_number": "923609016",
+            "name": "NORSK FISKEEKSPORT AS",
+            "website": "https://www.norskfiske.no/",
+        }
+        first_run = assess_company_identity(target, cand_match).to_dict()
+        for i in range(9):
+            subsequent_run = assess_company_identity(target, cand_match).to_dict()
+            self.assertEqual(first_run, subsequent_run, f"Non-deterministic result at iteration {i + 2}")
+
+
+class Stage2WebsiteDiscoveryTests(unittest.TestCase):
+    """Stage 2: Deterministic Website Discovery tests."""
+
+    def _make_profile(self, **kwargs):
+        base = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "municipality": "Bergen",
+            "industry_label": "Engroshandel med fisk",
+            "website": "",
+            "evidence": {},
+        }
+        base.update(kwargs)
+        return base
+
+    def test_request_budget_accounting(self):
+        budget = RequestBudget(max_total_requests=5, max_page_requests=2, max_search_requests=1)
+        self.assertTrue(budget.can_request("page"))
+        self.assertTrue(budget.can_request("search"))
+
+        budget.record_request("search", success=True)
+        self.assertEqual(budget.search_requests, 1)
+        self.assertEqual(budget.total_requests, 1)
+        self.assertFalse(budget.can_request("search"), "Search budget should be exhausted")
+
+        budget.record_request("page", success=True, redirects_count=1)
+        budget.record_request("page", success=False)
+        self.assertEqual(budget.page_requests, 2)
+        self.assertEqual(budget.redirects, 1)
+        self.assertEqual(budget.failed_requests, 1)
+        self.assertFalse(budget.can_request("page"), "Page budget should be exhausted")
+
+        # Total requests now 3 / 5
+        self.assertTrue(budget.can_request("robots"))
+        budget.record_request("robots", success=True)
+        budget.record_request("robots", success=True)
+        self.assertEqual(budget.total_requests, 5)
+        self.assertFalse(budget.can_request("robots"), "Total budget should be exhausted")
+        self.assertFalse(budget.can_request("page"))
+
+    def test_sitemap_xml_parsing(self):
+        # Direct urlset
+        urlset_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://example.com/</loc></url>
+            <url><loc>https://example.com/om-oss</loc></url>
+            <url><loc>https://example.com/kontakt</loc></url>
+            <url><loc>https://example.com/image.jpg</loc></url>
+        </urlset>"""
+        pages, sitemaps = parse_sitemap_xml(urlset_xml)
+        self.assertEqual(len(pages), 4)
+        self.assertEqual(sitemaps, [])
+        self.assertIn("https://example.com/om-oss", pages)
+
+        # Sitemap index
+        index_xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <sitemap><loc>https://example.com/sitemap1.xml</loc></sitemap>
+            <sitemap><loc>https://example.com/sitemap2.xml</loc></sitemap>
+        </sitemapindex>"""
+        pages, sitemaps = parse_sitemap_xml(index_xml)
+        self.assertEqual(pages, [])
+        self.assertEqual(len(sitemaps), 2)
+        self.assertEqual(sitemaps[0], "https://example.com/sitemap1.xml")
+
+    def test_sitemap_url_discovery_filtering(self):
+        fetcher = SafeHttpFetcher()
+        budget = RequestBudget(max_sitemap_requests=2)
+
+        sitemap_content = b"""<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://example.com/products/item1</loc></url>
+            <url><loc>https://example.com/om-oss</loc></url>
+            <url><loc>https://example.com/kontakt</loc></url>
+            <url><loc>https://example.com/banner.png</loc></url>
+            <url><loc>https://example.com/annual-report.pdf</loc></url>
+        </urlset>"""
+
+        with patch.object(fetcher, "fetch_page") as mock_fetch:
+            mock_fetch.return_value = DiscoveryFetchResult(
+                url="https://example.com/sitemap.xml",
+                final_url="https://example.com/sitemap.xml",
+                status_code=200,
+                content=sitemap_content,
+                html="",
+                title="",
+                meta_description="",
+                text_excerpt="",
+                content_sha256="abc",
+                error=None,
+                redirects_count=0,
+                elapsed_ms=10,
+            )
+            discovered = discover_sitemap_urls("https://example.com/", fetcher, budget)
+
+            # High signal pages (om-oss, kontakt) must be prioritized, assets excluded
+            self.assertTrue(len(discovered) >= 2)
+            self.assertEqual(discovered[0], "https://example.com/om-oss")
+            self.assertEqual(discovered[1], "https://example.com/kontakt")
+            self.assertNotIn("https://example.com/banner.png", discovered)
+            self.assertNotIn("https://example.com/annual-report.pdf", discovered)
+
+    def test_search_candidate_discovery_filtering(self):
+        profile = self._make_profile()
+        budget = RequestBudget(max_search_requests=1)
+
+        search_payload = {
+            "web": {
+                "results": [
+                    {"url": "https://proff.no/selskap/norsk-fiskeeksport", "title": "Proff", "description": "Dir"},
+                    {"url": "https://norskfiske.no/", "title": "Norsk Fiskeeksport AS", "description": "Offisiell side"},
+                    {"url": "https://facebook.com/norskfiske", "title": "Facebook", "description": "Social"},
+                ]
+            }
+        }
+        mock_search = lambda q: search_payload
+        candidates = discover_search_candidates(profile, mock_search, budget)
+
+        self.assertEqual(len(candidates), 3)
+        self.assertEqual(budget.search_requests, 1)
+
+        # proff.no and facebook.com must be identified as blocked hosts
+        blocked_hosts = [c.host for c in candidates if c.is_blocked_host]
+        self.assertIn("proff.no", blocked_hosts)
+        self.assertIn("facebook.com", blocked_hosts)
+
+        # Clean candidate
+        valid_candidates = [c for c in candidates if not c.is_blocked_host]
+        self.assertEqual(len(valid_candidates), 1)
+        self.assertEqual(valid_candidates[0].url, "https://norskfiske.no/")
+
+    def test_candidate_scoring(self):
+        profile = self._make_profile()
+
+        # 1. High scoring candidate with org number, name in title, name in host, municipality
+        score_high = score_candidate(
+            profile,
+            "https://norskfiske.no/",
+            title="Norsk Fiskeeksport AS - Forside",
+            snippet="Velkommen til Norsk Fiskeeksport AS i Bergen. Org nr 923 609 016. Engroshandel med fisk.",
+        )
+        self.assertTrue(score_high.publishable_candidate)
+        self.assertGreaterEqual(score_high.score, 0.8)
+        self.assertTrue(score_high.evidence_breakdown.get("org_number_match"))
+        self.assertTrue(score_high.evidence_breakdown.get("name_in_title"))
+        self.assertTrue(score_high.evidence_breakdown.get("name_in_host"))
+        self.assertTrue(score_high.evidence_breakdown.get("municipality_match"))
+
+        # 2. Blocked host candidate scores 0.0
+        score_blocked = score_candidate(profile, "https://proff.no/selskap/norsk-fiske")
+        self.assertEqual(score_blocked.score, 0.0)
+        self.assertFalse(score_blocked.publishable_candidate)
+        self.assertIn("directory", score_blocked.reasons[0].lower())
+
+        # 3. Unrelated candidate scores low
+        score_unrelated = score_candidate(
+            profile,
+            "https://completelyunrelated.com/",
+            title="Sko og Klær Nettbutikk",
+            snippet="Kjøp sko på nett.",
+        )
+        self.assertLess(score_unrelated.score, 0.4)
+        self.assertFalse(score_unrelated.publishable_candidate)
+
+    def test_exact_entity_verification(self):
+        profile = self._make_profile()
+
+        # 1. Verified via exact org number in content
+        page_verified = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS er et selskap i Bergen med organisasjonsnummer 923 609 016.",
+            content_sha256="123",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=50,
+        )
+        verdict, evidence_trail, reasons = verify_exact_entity(profile, [page_verified])
+        self.assertEqual(verdict, DiscoveryVerdictStatus.VERIFIED)
+        self.assertTrue(any(item.identifier == "organisation_number" and item.level == VerificationEvidenceLevel.STRONG for item in evidence_trail))
+
+        # 2. Abstain due to parked page marker
+        page_parked = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="This domain is for sale | HugeDomains. Norsk Fiskeeksport AS.",
+            content_sha256="123",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=50,
+        )
+        v_parked, _, r_parked = verify_exact_entity(profile, [page_parked])
+        self.assertEqual(v_parked, DiscoveryVerdictStatus.ABSTAIN)
+        self.assertTrue(any("parked" in r.lower() for r in r_parked))
+
+        # 3. Abstain due to conflicting org number
+        page_conflict = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS. Org nr 987 654 321. Different company.",
+            content_sha256="123",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=50,
+        )
+        v_conflict, _, r_conflict = verify_exact_entity(profile, [page_conflict])
+        self.assertEqual(v_conflict, DiscoveryVerdictStatus.ABSTAIN)
+        self.assertTrue(any("conflicting" in r.lower() for r in r_conflict))
+
+    def test_ssrf_and_robots_protection(self):
+        fetcher = SafeHttpFetcher()
+        budget = RequestBudget()
+
+        # SSRF: localhost and private IPs blocked
+        res_local = fetcher.fetch_page("http://localhost:8080/test", budget)
+        self.assertIn("SSRF blocked", res_local.error or "")
+
+        res_private = fetcher.fetch_page("http://127.0.0.1/test", budget)
+        self.assertIn("SSRF blocked", res_private.error or "")
+
+        res_loopback = fetcher.fetch_page("http://169.254.169.254/metadata", budget)
+        self.assertIn("SSRF blocked", res_loopback.error or "")
+
+        # Non-HTTP scheme
+        res_file = fetcher.fetch_page("file:///etc/passwd", budget)
+        self.assertIn("SSRF blocked", res_file.error or "")
+
+        # Robots.txt disallowed
+        with patch.object(fetcher, "is_robots_allowed", return_value=False):
+            res_robots = fetcher.fetch_page("https://example.com/secret", budget)
+            self.assertEqual(res_robots.status_code, 403)
+            self.assertIn("robots.txt", res_robots.error or "")
+
+    def test_discovery_pipeline_registry_website(self):
+        profile = self._make_profile(website="https://norskfiske.no/")
+        fetcher = SafeHttpFetcher()
+        budget = RequestBudget()
+
+        mock_page = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"<html><head><title>Norsk Fiskeeksport AS</title></head><body>Norsk Fiskeeksport AS org nr 923 609 016</body></html>",
+            html="<html><head><title>Norsk Fiskeeksport AS</title></head><body>Norsk Fiskeeksport AS org nr 923 609 016</body></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS org nr 923 609 016 i Bergen.",
+            content_sha256="abc",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=30,
+        )
+
+        with patch.object(fetcher, "fetch_page", return_value=mock_page):
+            result = discover_company_website(profile, fetcher=fetcher, budget=budget)
+            self.assertEqual(result.status, DiscoveryVerdictStatus.VERIFIED)
+            self.assertEqual(result.url, "https://norskfiske.no/")
+            self.assertIn("BRREG", result.decision_reason)
+
+    def test_discovery_pipeline_search_candidate(self):
+        profile = self._make_profile(website="")  # No registry website
+        fetcher = SafeHttpFetcher()
+        budget = RequestBudget()
+
+        search_payload = {
+            "web": {
+                "results": [
+                    {"url": "https://norskfiske.no/", "title": "Norsk Fiskeeksport AS - Forside", "description": "Norsk Fiskeeksport AS org 923609016"},
+                ]
+            }
+        }
+        mock_search = lambda q: search_payload
+
+        mock_page = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS org 923 609 016.",
+            content_sha256="abc",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=25,
+        )
+
+        with patch.object(fetcher, "fetch_page", return_value=mock_page):
+            result = discover_company_website(profile, search_func=mock_search, fetcher=fetcher, budget=budget)
+            self.assertEqual(result.status, DiscoveryVerdictStatus.VERIFIED)
+            self.assertEqual(result.url, "https://norskfiske.no/")
+            self.assertIn("search discovery", result.decision_reason)
+
+    def test_discovery_pipeline_safe_abstention_on_conflict(self):
+        profile = self._make_profile(website="")
+        fetcher = SafeHttpFetcher()
+        budget = RequestBudget()
+
+        search_payload = {
+            "web": {
+                "results": [
+                    {"url": "https://wrongfiske.no/", "title": "Norsk Fiskeeksport AS", "description": "Norsk Fiskeeksport"},
+                ]
+            }
+        }
+        mock_search = lambda q: search_payload
+
+        # Page has conflicting org number
+        mock_page = DiscoveryFetchResult(
+            url="https://wrongfiske.no/",
+            final_url="https://wrongfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS org 987 654 321. Another entity entirely.",
+            content_sha256="abc",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=25,
+        )
+
+        with patch.object(fetcher, "fetch_page", return_value=mock_page):
+            result = discover_company_website(profile, search_func=mock_search, fetcher=fetcher, budget=budget)
+            self.assertEqual(result.status, DiscoveryVerdictStatus.ABSTAIN)
+            self.assertIsNone(result.url)
+            self.assertTrue(any("abstain" in r.lower() for r in result.reasons))
+
+    def test_discovery_pipeline_budget_exhaustion(self):
+        profile = self._make_profile(website="")
+        fetcher = SafeHttpFetcher()
+        # Budget already exhausted
+        budget = RequestBudget(max_total_requests=0)
+
+        result = discover_company_website(profile, search_func=lambda q: {}, fetcher=fetcher, budget=budget)
+        self.assertEqual(result.status, DiscoveryVerdictStatus.ABSTAIN)
+        self.assertIn("budget exhausted", result.decision_reason.lower())
+
+    def test_deterministic_repeated_results(self):
+        profile = self._make_profile(website="https://norskfiske.no/")
+        mock_page = DiscoveryFetchResult(
+            url="https://norskfiske.no/",
+            final_url="https://norskfiske.no/",
+            status_code=200,
+            content=b"html",
+            html="<html></html>",
+            title="Norsk Fiskeeksport AS",
+            meta_description="",
+            text_excerpt="Norsk Fiskeeksport AS org nr 923 609 016.",
+            content_sha256="abc",
+            error=None,
+            redirects_count=0,
+            elapsed_ms=25,
+        )
+
+        runs = []
+        for _ in range(5):
+            fetcher = SafeHttpFetcher()
+            budget = RequestBudget()
+            with patch.object(fetcher, "fetch_page", return_value=mock_page):
+                res = discover_company_website(profile, fetcher=fetcher, budget=budget).to_dict()
+                runs.append(res)
+
+        for i in range(1, len(runs)):
+            self.assertEqual(runs[0], runs[i], f"Non-deterministic discovery result at run {i + 1}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
+
