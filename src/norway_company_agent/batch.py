@@ -55,7 +55,12 @@ def read_organisation_numbers(path: str | Path) -> list[str]:
     return [record["organisation_number"] for record in read_organisation_inputs(path)]
 
 
-def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def profiles_from_bulk(
+    path: str | Path,
+    organisation_numbers: Iterable[str],
+    *,
+    allow_missing: bool = True,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     requested = list(organisation_numbers)
     wanted = set(requested)
     snapshot_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
@@ -85,13 +90,40 @@ def profiles_from_bulk(path: str | Path, organisation_numbers: Iterable[str]) ->
         if len(found) == len(wanted):
             break
     missing = [org for org in requested if org not in found]
-    if missing:
+    if missing and not allow_missing:
         raise ValueError(f"Organisation numbers absent from registry snapshot: {missing[:10]}")
+    for org in missing:
+        found[org] = {
+            "organisation_number": org,
+            "name": "",
+            "legal_form": "",
+            "evidence": {
+                "registry": evidence(
+                    "registry",
+                    "not_found",
+                    "official_registry_bulk",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    note="Organisation number absent from registry snapshot",
+                    retrieved_at=retrieved_at,
+                    content_sha256=snapshot_sha256,
+                    source_row_key=org,
+                ),
+                "accounting_obligation": evidence(
+                    "accounting_obligation",
+                    "not_applicable",
+                    "official_registry_bulk",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    note="No registry profile available to determine accounting obligation",
+                    retrieved_at=retrieved_at,
+                ),
+            },
+        }
     return [found[org] for org in requested], {
         "registry_snapshot_sha256": snapshot_sha256,
         "registry_rows_scanned": scanned,
         "requested": len(requested),
         "selected": len(found),
+        "missing": len(missing),
     }
 
 

@@ -1,0 +1,156 @@
+{
+  "schema_version": "1.0.0",
+  "project": {
+    "name": "OrgTrace",
+    "version": "0.1.0",
+    "description": "Deterministic, evidence-backed Norwegian enterprise intelligence engine",
+    "repository": "namandeeptripathi/OrgTrace"
+  },
+  "reproducibility": {
+    "git_commit": "6d9d8d3b1a9da16b4cf17b670c845ee6271d0bec",
+    "git_branch": "main",
+    "python_version": "3.14.7",
+    "platform": "darwin",
+    "timestamp_utc": "2026-09-19T20:03:26Z"
+  },
+  "execution": {
+    "entrypoint_command": "./scripts/run_competition.sh",
+    "evaluation_command": "PYTHONPATH=src uv run python -m norway_company_agent.evaluation",
+    "test_command": "PYTHONPATH=src uv run python -m unittest tests.test_poc -v",
+    "benchmark_size": 1000,
+    "runtime_environment": "production"
+  },
+  "models_and_engines": [
+    {
+      "name": "Deterministic Pattern Engine",
+      "type": "rule_based_nlp",
+      "purpose": "Modulo 11 verification, legal form taxonomy, address congruence, exact-entity matching",
+      "cost_usd": 0.0
+    },
+    {
+      "name": "Financial Intelligence Engine",
+      "type": "rule_based_accounting",
+      "purpose": "Accounting obligation statutory assessment (Regnskapsloven), Regnskapsregisteret metric extraction",
+      "cost_usd": 0.0
+    },
+    {
+      "name": "Change Intelligence Engine",
+      "type": "semantic_diff",
+      "purpose": "Deterministic semantic diffing, snapshot immutability, failed-refresh preservation",
+      "cost_usd": 0.0
+    },
+    {
+      "name": "NbAiLab/nb-bert-base (Optional)",
+      "type": "transformer",
+      "purpose": "Norwegian text sentiment classification (optional crawler profile)",
+      "cost_usd": 0.0
+    }
+  ],
+  "external_apis": [
+    {
+      "name": "Enhetsregisteret Open API",
+      "endpoint": "https://data.brreg.no/enhetsregisteret/api",
+      "auth_required": false,
+      "license": "NLOD-2.0",
+      "attribution": "Inneholder data under Norsk lisens for offentlige data (NLOD) tilgjengeliggjort av Brønnøysundregistrene."
+    },
+    {
+      "name": "Regnskapsregisteret Open API",
+      "endpoint": "https://data.brreg.no/regnskapsregisteret/regnskap",
+      "auth_required": false,
+      "license": "NLOD-2.0",
+      "attribution": "Inneholder regnskapsdata under Norsk lisens for offentlige data (NLOD) tilgjengeliggjort av Brønnøysundregistrene."
+    },
+    {
+      "name": "Brave Search Web API (Optional)",
+      "endpoint": "https://api.search.brave.com/res/v1/web/search",
+      "auth_required": true,
+      "license": "Commercial Terms of Service",
+      "attribution": "Search candidate results provided via Brave Search API."
+    }
+  ],
+  "datasets": [
+    {
+      "filename": "entry-companies.jsonl",
+      "sha256": "01d262523f3b1fe71dc7e18b8f7675a866d3a79042e072b4961b0322fe1033b8",
+      "rows": 1000,
+      "description": "Selected competition entry batch from signalpost-universe.jsonl.gz (seed 20260823)"
+    },
+    {
+      "filename": "smoke-companies.jsonl",
+      "sha256": "524af04b21a1e6290ec9293fa2c49359e705396203254a01160d8ffdbebc3b00",
+      "rows": 10,
+      "description": "10-company smoke test subset of entry-companies.jsonl"
+    },
+    {
+      "filename": "brreg-enheter.csv",
+      "sha256": "5392f7a9b625594fdbd7aa21bbf2badc18201f0ec8956930bf47e3245166a455",
+      "rows": 1174956,
+      "description": "Brønnøysundregistrene Enhetsregisteret bulk CSV export"
+    },
+    {
+      "filename": "signalpost-universe.jsonl.gz",
+      "sha256": "1c89710e5b01f8617e86d09fbdff4a52f2f8dbbba297e74f7164b5984f5a0384",
+      "rows": 411160,
+      "description": "Signalpost 2025 public universe archive"
+    }
+  ],
+  "outputs": {
+    "envelopes_jsonl": {
+      "path": "out/envelopes.jsonl",
+      "sha256": "82f48920feb8e3954a6798a0fe6d7bab670665646c7d90f5d638923c89f7beab",
+      "count": 1000
+    },
+    "profiles_jsonl": {
+      "path": "out/profiles.jsonl",
+      "sha256": "e3bd2d8bdbc71a2378585c7c9d26216711b6b9f1b20e8d6bef5d1ea95fec8ed5",
+      "count": 1000
+    },
+    "report_json": {
+      "path": "out/run-report.json",
+      "sha256": "393e87e30c5148bb0229fac545a2ff8b8c57e0a13f070a207ce04956b022c487"
+    }
+  },
+  "pinned_dependencies": {
+    "beautifulsoup4": "4.15.0",
+    "extruct": "0.18.0",
+    "lxml": "6.1.2",
+    "pydantic": "2.13.4",
+    "pypdf": "6.16.1",
+    "tldextract": "5.3.2",
+    "trafilatura": "2.2.0",
+    "annotated-types": "0.8.0",
+    "babel": "2.18.0",
+    "certifi": "2026.7.22",
+    "charset-normalizer": "3.5.1",
+    "courlan": "1.4.0",
+    "dateparser": "1.4.2",
+    "filelock": "3.32.3",
+    "html-text": "0.7.1",
+    "html5lib": "1.1",
+    "htmldate": "1.10.0",
+    "idna": "3.19",
+    "jstyleson": "0.0.2",
+    "jusText": "3.0.2",
+    "lxml_html_clean": "0.4.5",
+    "mf2py": "2.0.1",
+    "pydantic_core": "2.46.4",
+    "pyparsing": "3.3.2",
+    "pyrdfa3": "3.6.5",
+    "python-dateutil": "2.9.0.post0",
+    "pytz": "2026.3.post1",
+    "rdflib": "7.6.0",
+    "regex": "2026.7.19",
+    "requests": "2.34.2",
+    "requests-file": "3.0.1",
+    "six": "1.17.0",
+    "soupsieve": "2.9.2",
+    "tld": "0.13.2",
+    "typing-inspection": "0.4.4",
+    "typing_extensions": "4.16.0",
+    "tzlocal": "5.4.4",
+    "urllib3": "2.7.0",
+    "w3lib": "2.4.1",
+    "webencodings": "0.6.1"
+  }
+}
