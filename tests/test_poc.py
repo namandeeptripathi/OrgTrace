@@ -82,6 +82,17 @@ from norway_company_agent.profile_extraction import (  # noqa: E402
     extract_locations,
     extract_news,
 )
+from norway_company_agent.financial_intelligence import (  # noqa: E402
+    CompanyFinancialProfile,
+    FinancialAccountType,
+    FinancialPdfDocument,
+    FinancialReportingPeriod,
+    FinancialStatement,
+    build_company_financial_profile,
+    extract_financial_pdfs,
+    extract_financials_from_pdf,
+    extract_official_accounts,
+)
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
@@ -2629,8 +2640,318 @@ class Stage3ProfileExtractionTests(unittest.TestCase):
         self.assertIsNotNone(extracted.description)
 
 
+class Stage4FinancialIntelligenceTests(unittest.TestCase):
+    """Stage 4: Financial Intelligence tests."""
+
+    def _make_sample_accounts_body(self):
+        return [
+            {
+                "id": 101,
+                "regnskapstype": "SELSKAP",
+                "valuta": "NOK",
+                "regnskapsperiode": {
+                    "fraDato": "2024-01-01",
+                    "tilDato": "2024-12-31",
+                },
+                "resultatregnskapResultat": {
+                    "driftsresultat": {
+                        "driftsinntekter": {"sumDriftsinntekter": 100000000},
+                        "driftsresultat": 15000000,
+                    },
+                    "ordinaertResultatFoerSkattekostnad": 14000000,
+                    "aarsresultat": 10500000,
+                },
+                "eiendeler": {"sumEiendeler": 85000000},
+                "egenkapitalGjeld": {
+                    "egenkapital": {"sumEgenkapital": 45000000},
+                    "gjeldOversikt": {"sumGjeld": 40000000},
+                },
+            },
+            {
+                "id": 102,
+                "regnskapstype": "KONSERN",
+                "valuta": "NOK",
+                "regnskapsperiode": {
+                    "fraDato": "2024-01-01",
+                    "tilDato": "2024-12-31",
+                },
+                "resultatregnskapResultat": {
+                    "driftsresultat": {
+                        "driftsinntekter": {"sumDriftsinntekter": 180000000},
+                        "driftsresultat": 25000000,
+                    },
+                    "ordinaertResultatFoerSkattekostnad": 23000000,
+                    "aarsresultat": 17500000,
+                },
+                "eiendeler": {"sumEiendeler": 150000000},
+                "egenkapitalGjeld": {
+                    "egenkapital": {"sumEgenkapital": 75000000},
+                    "gjeldOversikt": {"sumGjeld": 75000000},
+                },
+            },
+        ]
+
+    def test_official_accounts_extraction(self):
+        body = self._make_sample_accounts_body()
+        statements = extract_official_accounts(body, "923609016")
+
+        self.assertEqual(len(statements), 2)
+        stmt = statements[0]  # Standalone SELSKAP sorted first
+        self.assertEqual(stmt.account_type, FinancialAccountType.SELSKAP.value)
+        self.assertEqual(stmt.currency, "NOK")
+        self.assertEqual(stmt.period.year, 2024)
+        self.assertEqual(stmt.period.months, 12)
+
+        # Revenue
+        self.assertEqual(stmt.revenue.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.revenue.value, 100000000)
+
+        # Operating profit (driftsresultat)
+        self.assertEqual(stmt.operating_profit.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.operating_profit.value, 15000000)
+
+        # Profit before tax
+        self.assertEqual(stmt.profit_before_tax.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.profit_before_tax.value, 14000000)
+
+        # Net profit (årsresultat)
+        self.assertEqual(stmt.net_profit.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.net_profit.value, 10500000)
+
+        # Assets & Equity
+        self.assertEqual(stmt.total_assets.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.total_assets.value, 85000000)
+        self.assertEqual(stmt.total_equity.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.total_equity.value, 45000000)
+        self.assertEqual(stmt.total_debt.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.total_debt.value, 40000000)
+
+    def test_zero_vs_missing_financial_values(self):
+        """CRITICAL: Explicit zero must be preserved as 0, missing must be None (never 0)."""
+        body_with_zero = [
+            {
+                "id": 201,
+                "regnskapstype": "SELSKAP",
+                "valuta": "NOK",
+                "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"},
+                "revenue": 0,  # Explicit zero revenue
+                "operating_result": 0,  # Explicit break-even
+                "profit_before_tax": None,  # Not reported
+                "annual_result": None,  # Not reported
+            }
+        ]
+        statements = extract_official_accounts(body_with_zero, "923609016")
+        stmt = statements[0]
+
+        # Explicit 0 is FOUND with value 0
+        self.assertEqual(stmt.revenue.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.revenue.value, 0)
+        self.assertEqual(stmt.operating_profit.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.operating_profit.value, 0)
+
+        # Missing metric is NOT_FOUND with value None, NEVER 0!
+        self.assertEqual(stmt.profit_before_tax.status, FieldStatus.NOT_FOUND)
+        self.assertIsNone(stmt.profit_before_tax.value)
+        self.assertNotEqual(stmt.profit_before_tax.value, 0, "Missing metric must NEVER be converted to zero")
+
+        self.assertEqual(stmt.net_profit.status, FieldStatus.NOT_FOUND)
+        self.assertIsNone(stmt.net_profit.value)
+        self.assertNotEqual(stmt.net_profit.value, 0, "Missing metric must NEVER be converted to zero")
+
+    def test_negative_financial_values(self):
+        """Verify operating loss and net loss are accurately preserved as negative numbers."""
+        body_loss = [
+            {
+                "id": 301,
+                "regnskapstype": "SELSKAP",
+                "valuta": "NOK",
+                "regnskapsperiode": {"fraDato": "2024-01-01", "tilDato": "2024-12-31"},
+                "revenue": 5000000,
+                "operating_result": -1200000,  # Operating loss
+                "profit_before_tax": -1300000,
+                "annual_result": -1500000,  # Net loss
+            }
+        ]
+        statements = extract_official_accounts(body_loss, "923609016")
+        stmt = statements[0]
+
+        self.assertEqual(stmt.operating_profit.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.operating_profit.value, -1200000)
+        self.assertEqual(stmt.net_profit.status, FieldStatus.FOUND)
+        self.assertEqual(stmt.net_profit.value, -1500000)
+
+    def test_reporting_period_parsing(self):
+        # 1. Full standard 12-month period
+        p1 = {"fraDato": "2024-01-01", "tilDato": "2024-12-31"}
+        stmts1 = extract_official_accounts([{"regnskapsperiode": p1}], "923609016")
+        self.assertEqual(stmts1[0].period.year, 2024)
+        self.assertEqual(stmts1[0].period.months, 12)
+
+        # 2. Shortened 6-month stub period
+        p2 = {"fraDato": "2024-07-01", "tilDato": "2024-12-31"}
+        stmts2 = extract_official_accounts([{"regnskapsperiode": p2}], "923609016")
+        self.assertEqual(stmts2[0].period.year, 2024)
+        self.assertEqual(stmts2[0].period.months, 6)
+
+        # 3. Simple year string
+        stmts3 = extract_official_accounts([{"regnskapsperiode": "2023"}], "923609016")
+        self.assertEqual(stmts3[0].period.year, 2023)
+        self.assertEqual(stmts3[0].period.months, 12)
+
+    def test_selskap_vs_konsern_distinction(self):
+        body = self._make_sample_accounts_body()
+        statements = extract_official_accounts(body, "923609016")
+
+        # Standalone SELSKAP statement must be sorted first for exact entity identity
+        self.assertEqual(statements[0].account_type, FinancialAccountType.SELSKAP.value)
+        self.assertEqual(statements[0].revenue.value, 100000000)
+
+        # Consolidated KONSERN statement must follow
+        self.assertEqual(statements[1].account_type, FinancialAccountType.KONSERN.value)
+        self.assertEqual(statements[1].revenue.value, 180000000)
+
+    def test_accounting_obligation_integration(self):
+        # 1. AS: Always obliged
+        as_profile = {"organisation_number": "923609016", "name": "Test AS", "legal_form": "AS"}
+        fin_as = build_company_financial_profile(as_profile)
+        self.assertEqual(fin_as.accounting_obligation["value"]["classification"], "required_by_legal_form")
+
+        # 2. ENK: Threshold or activity dependent
+        enk_profile = {"organisation_number": "923609017", "name": "Test ENK", "legal_form": "ENK", "employees": 0}
+        fin_enk = build_company_financial_profile(enk_profile)
+        self.assertEqual(fin_enk.accounting_obligation["value"]["classification"], "threshold_or_activity_dependent")
+        self.assertEqual(fin_enk.overall_status, "exempt_or_threshold_dependent")
+
+    def test_financial_history_and_pdf_links(self):
+        history = ["2022", "2024", "2023", "invalid"]
+        pdfs = extract_financial_pdfs(history, "923609016")
+
+        self.assertEqual(len(pdfs), 3)
+        years = [p.year for p in pdfs]
+        self.assertEqual(years, ["2024", "2023", "2022"], "PDFs must be sorted descending by year")
+        self.assertTrue(pdfs[0].is_official_filing)
+        self.assertTrue(pdfs[0].url.endswith("/923609016/2024"))
+
+    def test_website_annual_report_pdf_detection(self):
+        website_val = {
+            "final_url": "https://norskfiske.no/",
+            "pages": [
+                {"url": "https://norskfiske.no/investor/aarsrapport-2023.pdf"},
+                {"url": "https://norskfiske.no/media/produktkatalog.pdf"},  # Non-financial
+                {"url": "https://norskfiske.no/ir/delarsrapport-q2-2024.pdf"},
+            ],
+        }
+        pdfs = extract_financial_pdfs([], "923609016", website_value=website_val)
+
+        urls = [p.url for p in pdfs]
+        self.assertIn("https://norskfiske.no/investor/aarsrapport-2023.pdf", urls)
+        self.assertIn("https://norskfiske.no/ir/delarsrapport-q2-2024.pdf", urls)
+        self.assertNotIn("https://norskfiske.no/media/produktkatalog.pdf", urls)
+
+        ar = next(p for p in pdfs if "aarsrapport-2023" in p.url)
+        self.assertEqual(ar.year, "2023")
+        self.assertEqual(ar.document_type, "annual_report")
+        self.assertEqual(ar.source_type, "company_website_ir")
+        self.assertFalse(ar.is_official_filing)
+
+    def test_pdf_exact_entity_verification(self):
+        # PDF text containing numbers but missing the 9-digit org number -> reject
+        unverified_text = """
+        ÅRSRAPPORT 2023
+        Driftsinntekter: 50 000 000
+        Driftsresultat: 5 000 000
+        Årsresultat: 3 000 000
+        """
+        stmt_rejected = extract_financials_from_pdf(unverified_text, "923609016", "2023", "https://example.test/ar.pdf")
+        self.assertIsNone(stmt_rejected, "PDF without exact org number must be rejected to prevent entity confusion")
+
+        # PDF text containing the exact 9-digit org number -> accept
+        verified_text = f"""
+        Norsk Fiskeeksport AS
+        Organisasjonsnummer: 923 609 016
+        ÅRSRAPPORT 2023
+        Driftsinntekter: 50 000 000
+        Driftsresultat: 5 000 000
+        Årsresultat: 3 000 000
+        Sum eiendeler: 70 000 000
+        Sum egenkapital: 35 000 000
+        """
+        stmt_accepted = extract_financials_from_pdf(verified_text, "923609016", "2023", "https://example.test/ar.pdf")
+        self.assertIsNotNone(stmt_accepted)
+        self.assertEqual(stmt_accepted.revenue.value, 50000000)
+        self.assertEqual(stmt_accepted.operating_profit.value, 5000000)
+        self.assertEqual(stmt_accepted.net_profit.value, 3000000)
+        self.assertEqual(stmt_accepted.total_assets.value, 70000000)
+        self.assertEqual(stmt_accepted.total_equity.value, 35000000)
+
+    def test_pdf_text_financial_extraction(self):
+        # Test TNOK multiplier detection ("tall i tusen")
+        tnok_text = """
+        Equinor AS
+        Org.nr: 923 609 016
+        Årsregnskap 2023 (Tall i tusen kroner)
+        Sum driftsinntekter: 45 000
+        Driftsresultat: 8 500
+        Ordinært resultat før skattekostnad: 8 000
+        Årsresultat: 6 200
+        Sum eiendeler: 120 000
+        Sum egenkapital: 65 000
+        Sum gjeld: 55 000
+        """
+        stmt = extract_financials_from_pdf(tnok_text, "923609016", "2023", "https://example.test/ar.pdf")
+        self.assertIsNotNone(stmt)
+        self.assertEqual(stmt.revenue.value, 45000000)
+        self.assertEqual(stmt.operating_profit.value, 8500000)
+        self.assertEqual(stmt.profit_before_tax.value, 8000000)
+        self.assertEqual(stmt.net_profit.value, 6200000)
+        self.assertEqual(stmt.total_assets.value, 120000000)
+        self.assertEqual(stmt.total_equity.value, 65000000)
+        self.assertEqual(stmt.total_debt.value, 55000000)
+
+    def test_evidence_spans_and_source_attribution(self):
+        body = self._make_sample_accounts_body()
+        statements = extract_official_accounts(body, "923609016")
+        stmt = statements[0]
+
+        for field_obj in (stmt.revenue, stmt.operating_profit, stmt.profit_before_tax, stmt.net_profit, stmt.total_assets, stmt.total_equity, stmt.total_debt):
+            self.assertEqual(field_obj.status, FieldStatus.FOUND)
+            self.assertIsNotNone(field_obj.evidence_span)
+            self.assertIsNotNone(field_obj.source_url)
+            self.assertEqual(field_obj.source_type, "official_regnskapsregisteret")
+            self.assertEqual(field_obj.confidence, 1.0)
+
+    def test_missing_accounts_honest_abstention(self):
+        # Empty profile with no accounts and no PDFs
+        empty_profile = {"organisation_number": "999999999", "name": "Spøkelse AS", "legal_form": "AS"}
+        fin_profile = build_company_financial_profile(empty_profile)
+
+        self.assertIsNone(fin_profile.latest_accounts)
+        self.assertEqual(len(fin_profile.historical_accounts), 0)
+        self.assertEqual(len(fin_profile.financial_pdfs), 0)
+        self.assertEqual(fin_profile.overall_status, "no_accounts_available")
+
+    def test_deterministic_financial_results(self):
+        profile = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "legal_form": "AS",
+            "evidence": {
+                "accounting_obligation": accounting_obligation_assessment({"legal_form": "AS", "organisation_number": "923609016"}),
+                "financials": {"status": "available", "value": self._make_sample_accounts_body()},
+                "financial_history": {"status": "available", "value": ["2023", "2024"]},
+            },
+        }
+        runs = []
+        for _ in range(5):
+            runs.append(build_company_financial_profile(profile).to_dict())
+
+        for i in range(1, len(runs)):
+            self.assertEqual(runs[0], runs[i], f"Non-deterministic financial profile at run {i + 1}")
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

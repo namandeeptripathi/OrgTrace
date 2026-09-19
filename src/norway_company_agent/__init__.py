@@ -55,3 +55,15 @@ from .profile_extraction import (
     extract_locations,
     extract_news,
 )
+from .financial_intelligence import (
+    CompanyFinancialProfile,
+    FinancialAccountType,
+    FinancialPdfDocument,
+    FinancialReportingPeriod,
+    FinancialStatement,
+    build_company_financial_profile,
+    extract_financial_pdfs,
+    extract_financials_from_pdf,
+    extract_official_accounts,
+)
+

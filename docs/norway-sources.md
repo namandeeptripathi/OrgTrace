@@ -56,6 +56,24 @@ The Stage 3 profile extraction engine (`norway_company_agent.profile_extraction`
 - **Evidence Spans & Attribution**: Every field is wrapped in `ExtractedField[T]` with complete provenance: `field_name`, `value`, `status` (`found`, `not_found`, `unavailable`, `extraction_failed`), `source_url`, `source_type`, `evidence_span`, `confidence`, and `note`.
 - **Honest Abstention & Zero Fabrication**: Missing fields are never hallucinated or populated with placeholder values. Uncrawled or unprovided sources explicitly yield `unavailable`, while inspected sources lacking a given field yield `not_found`.
 
+## Stage 4 — Financial Intelligence
+
+The Stage 4 financial intelligence engine (`norway_company_agent.financial_intelligence`) extracts, normalizes, and verifies official financial figures, accounting obligations, and financial filings without guessing:
+- **Official Accounts (Regnskapsregisteret)**: Ingests official annual accounts from `BRREG_ACCOUNTS` (`https://data.brreg.no/regnskapsregisteret/regnskap/{org}`). Normalizes core financial metrics:
+  - **Revenue**: `driftsinntekter` / `sumDriftsinntekter`
+  - **Operating Profit/Loss**: `driftsresultat` (EBIT)
+  - **Profit Before Tax**: `ordinaertResultatFoerSkattekostnad`
+  - **Net Annual Profit/Loss**: `aarsresultat`
+  - **Total Assets**: `sumEiendeler`
+  - **Total Equity**: `sumEgenkapital`
+  - **Total Debt/Liabilities**: `sumGjeld`
+- **Key Invariant: Never Treat Missing as Zero**: In accounting, `0` is a valid numerical result (e.g. a company reporting 0 NOK revenue or 0 NOK operating profit). Unreported or missing fields are strictly preserved as `value=None` with `status=FieldStatus.NOT_FOUND` or `UNAVAILABLE`.
+- **Reporting Periods**: Parses exact start (`fraDato`) and end (`tilDato`) dates, fiscal year, and duration in months (handling standard 12-month fiscal years and shortened/extended stub periods).
+- **Account Types**: Distinguishes standalone legal entity accounts (`SELSKAP`) from consolidated group accounts (`KONSERN`). Standalone `SELSKAP` accounts are prioritized as the primary anchor for exact entity matching.
+- **Accounting Obligation Assessment**: Evaluates statutory obligations (`ALWAYS_ACCOUNTING_OBLIGED_FORMS` such as `AS`, `ASA` vs `THRESHOLD_OR_ACTIVITY_FORMS` such as `ENK`, `ANS`, `DA`), distinguishing companies that have an unfulfilled filing obligation from those legally exempt.
+- **Financial PDF Detection & Extraction**: Discovers official filing copies from `BRREG_ACCOUNT_PDF` (`https://data.brreg.no/regnskapsregisteret/regnskap/aarsregnskap/kopi/{org}/{year}`) and first-party annual report PDFs from company website IR pages. Extracts financial line items from PDF text using exact-entity verification (validating the 9-digit org number in the document to prevent parent/subsidiary conflation).
+- **Evidence Provenance**: Every financial metric is wrapped in `ExtractedField` with explicit `source_url`, `source_type` (`official_regnskapsregisteret`, `official_annual_report_pdf`, `company_website_ir`), and evidence span.
+
 ## Coverage limits
 
 - Public annual accounts do not exist for every registered entity. AS and ASA generally file; many sole
