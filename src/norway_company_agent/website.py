@@ -37,21 +37,7 @@ PRIORITY_TERMS = (
 )
 
 
-def assert_public_url(url: str) -> None:
-    parsed = urllib.parse.urlparse(url)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme not in {"http", "https"} or not host:
-        raise ValueError("Only public HTTP(S) URLs are allowed")
-    if host == "localhost" or host.endswith(".localhost") or host.endswith(".local"):
-        raise ValueError("Local hosts are blocked")
-    try:
-        addresses = {item[4][0] for item in socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)}
-    except socket.gaierror as exc:
-        raise ValueError("Hostname did not resolve") from exc
-    for address in addresses:
-        ip = ipaddress.ip_address(address)
-        if not ip.is_global:
-            raise ValueError("Private, loopback, link-local, multicast, and reserved addresses are blocked")
+from .url_safety import assert_public_url
 
 
 class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):

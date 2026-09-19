@@ -215,6 +215,52 @@ The Stage 10 evaluation and optimization layer (`norway_company_agent.evaluation
   - Machine-readable dictionary output (`to_dict()`).
   - Human-readable GitHub-flavored markdown output (`to_markdown()`) with executive summary tables, telemetry metrics, and per-case breakdowns.
 
+## Stage 11 — Production Hardening
+
+The Stage 11 production hardening layer establishes reproducible, safe, and observable production execution:
+- **Reproducible Setup & Pinned Dependencies**:
+  - Supported on `Python >= 3.12` (audited on Python 3.14.7).
+  - Pinned runtime dependencies in `requirements.txt` and `requirements-dev.txt` mirroring `pyproject.toml` and `uv.lock`.
+  - Detailed clean installation and deployment guide in `docs/production-hardening.md`.
+- **Secret Handling & Configuration Hardening (`norway_company_agent.config`)**:
+  - Centralized `AppConfig` loading from environment variables or `.env`.
+  - Complete `.env.example` configuration template.
+  - Secret redaction via `redact_secret_value` and `redact_secrets_from_text`.
+  - Zero raw credentials or fake keys committed to version control.
+  - Strict validation preventing invalid settings (negative timeouts, negative retry caps, invalid log levels).
+- **URL Safety & SSRF Protection (`norway_company_agent.url_safety`)**:
+  - Centralized `validate_public_url` and `assert_public_url`.
+  - Rejects dangerous schemes (`file://`, `javascript:`, `data:`, `vbscript:`, `ftp:`).
+  - Rejects embedded credentials in URLs (`http://user:pass@host`).
+  - Rejects localhost, loopback, link-local, multicast, and private IP ranges (`127.0.0.1`, `10.0.0.0/8`, `192.168.0.0/16`, `172.16.0.0/12`, `169.254.0.0/16`).
+  - Enforces maximum URL length limit (4,096 chars).
+  - `sanitize_url_for_logging` redacts credentials and sensitive query parameters.
+- **Source Licensing & Attribution (`norway_company_agent.licensing`)**:
+  - Explicit licensing catalog (`get_source_license_info`):
+    - Brønnøysundregistrene: `NLOD-2.0` (Norwegian Licence for Open Government Data) with required attribution.
+    - Lovdata: Public sector legal information.
+    - SSB: `NLOD-2.0` open data.
+    - Brave Search: Commercial API terms of service.
+    - First-party websites: Corporate copyright with fair-use factual extraction.
+    - Proff/Purehelp: Proprietary restricted databases (automated scraping blocked by policy).
+    - Unverified sources: Honestly represented as `unknown_unverified` without fabricated open licenses.
+- **Network Resilience & Failure Recovery (`norway_company_agent.resilience`)**:
+  - Bounded exponential backoff with jitter (`execute_with_retry`, `RetryPolicy`).
+  - Distinguishes retryable errors (`429`, `500`, `502`, `503`, `504`) from non-retryable errors (`400`, `401`, `403`, `404`, `410`, `422`).
+  - Parses and respects `Retry-After` headers.
+  - Capped retries guarantee zero infinite retry loops.
+  - Explicit `PartialFailureResult` separates succeeded from failed components.
+- **Structured Logging & Secret Redaction (`norway_company_agent.logging_utils`)**:
+  - Standard Python `logging` with contextual log attributes (`engine`, `operation`, `case_id`, `duration_ms`, `status`).
+  - `SecretRedactionFilter` automatically masks sensitive values (`secr****1234`) and auth headers.
+  - Configurable log levels (`ORGTRACE_LOG_LEVEL`) and optional structured JSON output.
+- **Lightweight Observability (`norway_company_agent.observability`)**:
+  - `ProductionMetricsCollector` tracks operations, latencies, success rates, request counts, and refresh outcomes in memory.
+  - `get_metrics_snapshot()` API provides health check and telemetry snapshots without heavy external dependencies.
+- **Failure-Safe Data Handling**:
+  - Verifies failed-refresh preservation: fetch failures never delete existing snapshot claims.
+  - Snapshot immutability enforced across all models.
+
 ## Coverage limits
 
 - Public annual accounts do not exist for every registered entity. AS and ASA generally file; many sole

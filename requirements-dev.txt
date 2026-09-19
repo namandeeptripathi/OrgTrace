@@ -1,0 +1,7 @@
+# Development & Testing Dependencies for OrgTrace
+-r requirements.txt
+
+# Testing & Linting
+coverage>=7.6.0
+pytest>=8.3.0
+ruff>=0.9.0

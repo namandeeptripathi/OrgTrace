@@ -11,6 +11,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
+import urllib.error
+import urllib.request
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -201,6 +203,56 @@ from norway_company_agent.evaluation import (  # noqa: E402
     evaluate_external_precision,
     evaluate_recall,
     evaluate_refresh_correctness,
+)
+from norway_company_agent.url_safety import (  # noqa: E402
+    DangerousSchemeError,
+    EmbeddedCredentialsError,
+    InvalidHostError,
+    PrivateNetworkAccessError,
+    UrlLengthExceededError,
+    UrlSafetyError,
+    UrlValidationResult,
+    assert_public_url,
+    sanitize_url_for_logging,
+    validate_public_url,
+)
+from norway_company_agent.config import (  # noqa: E402
+    AppConfig,
+    ConfigValidationError,
+    EvaluationConfig,
+    LoggingConfig,
+    MissingCredentialError,
+    NetworkSafetyConfig,
+    ProviderConfig,
+    load_config_from_env,
+    redact_secret_value,
+    redact_secrets_from_text,
+)
+from norway_company_agent.resilience import (  # noqa: E402
+    MalformedResponseError,
+    NonRetryableHttpError,
+    PartialFailureResult,
+    RateLimitExceededError,
+    ResilienceError,
+    RetryPolicy,
+    UpstreamTimeoutError,
+    execute_with_retry,
+    parse_retry_after,
+)
+from norway_company_agent.licensing import (  # noqa: E402
+    KNOWN_SOURCE_LICENSES,
+    LicenseType,
+    SourceLicenseInfo,
+    get_source_license_info,
+)
+from norway_company_agent.logging_utils import (  # noqa: E402
+    SecretRedactionFilter,
+    StructuredJsonFormatter,
+    get_logger,
+    setup_logging,
+)
+from norway_company_agent.observability import (  # noqa: E402
+    ProductionMetricsCollector,
 )
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
@@ -5003,6 +5055,335 @@ class Stage10EvaluationOptimizationTests(unittest.TestCase):
         empty_fc = calculate_false_change_rate([], set())
         self.assertEqual(empty_fc.total_detected_changes, 0)
         self.assertEqual(empty_fc.false_change_rate, 0.0)
+
+
+class Stage11ProductionHardeningTests(unittest.TestCase):
+    """Stage 11: Production Hardening tests."""
+
+    def test_clean_configuration_loading(self):
+        env = {
+            "ORGTRACE_ENV": "production",
+            "ORGTRACE_LOG_LEVEL": "INFO",
+            "ORGTRACE_CONNECT_TIMEOUT": "5.0",
+            "ORGTRACE_READ_TIMEOUT": "15.0",
+            "ORGTRACE_MAX_RETRIES": "2",
+            "ORGTRACE_RETRY_BACKOFF": "0.5",
+            "ORGTRACE_MAX_URL_LENGTH": "2048",
+            "ORGTRACE_ENFORCE_DNS_CHECK": "false",
+            "BRAVE_SEARCH_API_KEY": "brv_live_test_key_12345678",
+        }
+        config = load_config_from_env(env)
+        self.assertEqual(config.environment, "production")
+        self.assertEqual(config.network.connect_timeout, 5.0)
+        self.assertEqual(config.network.read_timeout, 15.0)
+        self.assertEqual(config.network.max_retries, 2)
+        self.assertEqual(config.network.retry_backoff, 0.5)
+        self.assertEqual(config.network.max_url_length, 2048)
+        self.assertFalse(config.network.enforce_dns_check)
+        self.assertEqual(config.provider.brave_search_api_key, "brv_live_test_key_12345678")
+
+        # Verify safe dictionary serialization redacts API key
+        safe_dict = config.to_dict(redact=True)
+        self.assertIn("****", safe_dict["provider"]["brave_search_api_key"])
+        self.assertNotIn("brv_live_test_key_12345678", safe_dict["provider"]["brave_search_api_key"])
+
+    def test_invalid_configuration_rejection(self):
+        # 1. Negative timeout
+        with self.assertRaises(ConfigValidationError):
+            load_config_from_env({"ORGTRACE_CONNECT_TIMEOUT": "-1.0"})
+
+        # 2. Negative max retries
+        with self.assertRaises(ConfigValidationError):
+            load_config_from_env({"ORGTRACE_MAX_RETRIES": "-5"})
+
+        # 3. Invalid log level
+        with self.assertRaises(ConfigValidationError):
+            load_config_from_env({"ORGTRACE_LOG_LEVEL": "SUPER_VERBOSE"})
+
+        # 4. Invalid environment
+        with self.assertRaises(ConfigValidationError):
+            load_config_from_env({"ORGTRACE_ENV": "unsupported_env"})
+
+        # 5. Non-HTTPS BRREG endpoint
+        with self.assertRaises(ConfigValidationError):
+            load_config_from_env({"BRREG_API_BASE_URL": "http://insecure-brreg.test"})
+
+    def test_missing_secret_handling(self):
+        config = load_config_from_env({"BRAVE_SEARCH_API_KEY": ""})
+        self.assertIsNone(config.provider.brave_search_api_key)
+
+        with self.assertRaises(MissingCredentialError) as ctx:
+            config.provider.require_brave_api_key()
+        self.assertIn("BRAVE_SEARCH_API_KEY is not set", str(ctx.exception))
+
+    def test_secret_redaction_in_text_and_logs(self):
+        # 1. Single secret masking
+        secret = "sk_live_secret_key_9876543210"
+        redacted = redact_secret_value(secret)
+        self.assertTrue(redacted.startswith("sk_l"))
+        self.assertTrue(redacted.endswith("3210"))
+        self.assertIn("****", redacted)
+        self.assertNotIn("secret_key", redacted)
+
+        # 2. Short secret
+        self.assertEqual(redact_secret_value("abc"), "[REDACTED]")
+
+        # 3. Text redaction with known secret and regex headers
+        text = (
+            "Request failed with X-Subscription-Token: super_secret_token_12345 "
+            "using secret sk_live_secret_key_9876543210."
+        )
+        cleaned = redact_secrets_from_text(text, known_secrets=[secret])
+        self.assertNotIn("super_secret_token_12345", cleaned)
+        self.assertNotIn("sk_live_secret_key_9876543210", cleaned)
+        self.assertIn("[REDACTED]", cleaned)
+
+    def test_url_validation_safe_public_urls(self):
+        safe_urls = [
+            "https://data.brreg.no/enhetsregisteret/api/enheter/923609016",
+            "https://norskfiske.no",
+            "https://www.norskfiske.no/om-oss?lang=no",
+            "http://example.com/api/v1?page=1&limit=50",
+            "https://sub.domain.co.uk/path/file.html",
+        ]
+        for u in safe_urls:
+            res = validate_public_url(u)
+            self.assertTrue(res.is_safe, f"Expected safe for {u}: {res.error}")
+            self.assertIsNotNone(res.normalized_url)
+            # assert_public_url must not raise
+            assert_public_url(u)
+
+    def test_url_validation_dangerous_schemes(self):
+        dangerous = [
+            "file:///etc/passwd",
+            "file://c:/windows/win.ini",
+            "javascript:alert(document.cookie)",
+            "data:text/html,<script>alert(1)</script>",
+            "vbscript:msgbox(1)",
+            "ftp://files.example.com/dump.tar",
+            "gopher://gopher.example.com/",
+        ]
+        for u in dangerous:
+            res = validate_public_url(u)
+            self.assertFalse(res.is_safe, f"Expected unsafe for {u}")
+            self.assertIn("scheme", (res.error or "").lower())
+            with self.assertRaises(DangerousSchemeError):
+                assert_public_url(u)
+
+    def test_url_validation_embedded_credentials(self):
+        credential_urls = [
+            "https://admin:secret123@api.example.com/data",
+            "http://user@example.com/",
+            "https://user:pass@1.2.3.4/",
+        ]
+        for u in credential_urls:
+            res = validate_public_url(u)
+            self.assertFalse(res.is_safe)
+            self.assertIn("embedded credentials", (res.error or "").lower())
+            with self.assertRaises(EmbeddedCredentialsError):
+                assert_public_url(u)
+
+    def test_url_validation_private_and_localhost_ssrf(self):
+        ssrf_targets = [
+            "http://localhost/",
+            "http://localhost:8080/admin",
+            "http://127.0.0.1/",
+            "http://127.0.0.1:9000/internal",
+            "http://0.0.0.0/",
+            "http://10.0.0.1/sensitive",
+            "http://192.168.1.1/router",
+            "http://172.16.0.1/metadata",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://service.internal/api",
+            "http://app.local/",
+        ]
+        for u in ssrf_targets:
+            res = validate_public_url(u)
+            self.assertFalse(res.is_safe, f"Expected SSRF rejection for {u}")
+            with self.assertRaises(PrivateNetworkAccessError):
+                assert_public_url(u)
+
+    def test_url_validation_excessive_length(self):
+        long_url = "https://example.com/path?" + ("x" * 4100)
+        res = validate_public_url(long_url, max_length=4096)
+        self.assertFalse(res.is_safe)
+        self.assertIn("exceeds maximum allowed limit", res.error or "")
+        with self.assertRaises(UrlLengthExceededError):
+            assert_public_url(long_url)
+
+    def test_url_sanitization_for_logging(self):
+        url = "https://admin:secretPass123@api.search.brave.com/res/v1/web/search?q=test&api_key=real_key_xyz987&token=bearer_123"
+        sanitized = sanitize_url_for_logging(url)
+
+        self.assertNotIn("secretPass123", sanitized)
+        self.assertNotIn("real_key_xyz987", sanitized)
+        self.assertNotIn("bearer_123", sanitized)
+        self.assertIn("q=test", sanitized)
+        self.assertIn("[REDACTED]", sanitized)
+
+    def test_bounded_retry_behavior_on_retryable_errors(self):
+        attempts_recorded = []
+
+        def failing_503():
+            attempts_recorded.append(time.monotonic())
+            req = urllib.request.Request("https://example.test")
+            raise urllib.error.HTTPError("https://example.test", 503, "Service Unavailable", {}, None)
+
+        policy = RetryPolicy(max_retries=2, base_delay=0.01, max_delay=0.05, jitter=False)
+        with self.assertRaises(ResilienceError) as ctx:
+            execute_with_retry(failing_503, policy=policy)
+
+        # Must execute initial attempt + 2 retries = 3 attempts total
+        self.assertEqual(len(attempts_recorded), 3)
+        self.assertIn("HTTP 503", str(ctx.exception))
+
+    def test_immediate_failure_on_non_retryable_errors(self):
+        non_retryable_codes = [400, 401, 403, 404, 410, 422]
+
+        for code in non_retryable_codes:
+            call_count = {"count": 0}
+
+            def failing_http():
+                call_count["count"] += 1
+                raise urllib.error.HTTPError("https://example.test", code, f"Error {code}", {}, None)
+
+            policy = RetryPolicy(max_retries=3, base_delay=0.01)
+            with self.assertRaises(NonRetryableHttpError) as ctx:
+                execute_with_retry(failing_http, policy=policy)
+
+            # Must fail immediately on attempt 1 with zero wasteful retries
+            self.assertEqual(call_count["count"], 1, f"Failed immediate failure for HTTP {code}")
+            self.assertEqual(ctx.exception.status_code, code)
+
+    def test_rate_limit_retry_after_header_handling(self):
+        # 1. Seconds format
+        secs = parse_retry_after("3")
+        self.assertEqual(secs, 3.0)
+
+        # 2. HTTP-date format
+        future_dt = "Wed, 21 Oct 2026 07:28:00 GMT"
+        parsed = parse_retry_after(future_dt)
+        self.assertIsNotNone(parsed)
+
+        # 3. Invalid format
+        self.assertIsNone(parse_retry_after("invalid_header"))
+        self.assertIsNone(parse_retry_after(None))
+
+    def test_source_licensing_metadata_resolution(self):
+        # 1. BRREG NLOD 2.0
+        brreg_lic = get_source_license_info("https://data.brreg.no/enhetsregisteret/api/enheter/923609016")
+        self.assertEqual(brreg_lic.license_type, LicenseType.NLOD_2_0)
+        self.assertTrue(brreg_lic.attribution_required)
+        self.assertTrue(brreg_lic.is_open_data)
+        self.assertIn("Brønnøysundregistrene", brreg_lic.attribution_statement)
+
+        # 2. Lovdata public legal data
+        lovdata_lic = get_source_license_info("https://lovdata.no/dokument/NL/lov/1997-06-13-44")
+        self.assertEqual(lovdata_lic.license_type, LicenseType.PUBLIC_SECTOR_INFORMATION)
+        self.assertTrue(lovdata_lic.attribution_required)
+
+        # 3. Brave Search API terms
+        brave_lic = get_source_license_info("https://search.brave.com/search")
+        self.assertEqual(brave_lic.license_type, LicenseType.COMMERCIAL_TERMS_OF_SERVICE)
+
+        # 4. First-party company site
+        company_lic = get_source_license_info("https://norskfiske.no/om-oss", source_type="company_website")
+        self.assertEqual(company_lic.license_type, LicenseType.FIRST_PARTY_COPYRIGHT)
+        self.assertIn("norskfiske.no", company_lic.attribution_statement)
+
+        # 5. Unknown external domain
+        unknown_lic = get_source_license_info("https://random-unknown-domain.org/data")
+        self.assertEqual(unknown_lic.license_type, LicenseType.UNKNOWN_UNVERIFIED)
+        self.assertFalse(unknown_lic.is_open_data)
+
+    def test_structured_logging_with_secret_redaction(self):
+        import io
+        import logging
+
+        secret_token = "secret_super_token_999888"
+        redaction_filter = SecretRedactionFilter(known_secrets=[secret_token])
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        handler.addFilter(redaction_filter)
+        handler.setFormatter(logging.Formatter("%(message)s"))
+
+        logger = logging.getLogger("test_redaction_logger")
+        logger.setLevel(logging.INFO)
+        logger.handlers.clear()
+        logger.addHandler(handler)
+
+        logger.info("Connecting with API token %s to upstream", secret_token)
+        logger.info("Header: Authorization: Bearer %s", secret_token)
+
+        log_output = stream.getvalue()
+        self.assertNotIn(secret_token, log_output)
+        self.assertIn("****", log_output)
+
+    def test_observability_metrics_collector(self):
+        collector = ProductionMetricsCollector()
+        collector.reset()
+
+        # Record operations
+        collector.record_operation("identity_engine", "lookup", duration_seconds=0.05, status="success")
+        collector.record_operation("website_discovery", "crawl", duration_seconds=0.20, status="failure", error_category="timeout")
+
+        # Record requests
+        collector.record_request("identity_engine", status_code=200)
+        collector.record_request("website_discovery", status_code=504, is_failed=True, is_retry=True)
+
+        # Record refresh outcome
+        collector.record_refresh_outcome("unchanged")
+        collector.record_refresh_outcome("modified")
+
+        snapshot = collector.get_metrics_snapshot()
+        self.assertEqual(snapshot["total_operations"], 2)
+        self.assertEqual(snapshot["status_counts"]["success"], 1)
+        self.assertEqual(snapshot["status_counts"]["failure"], 1)
+        self.assertAlmostEqual(snapshot["success_rate"], 0.5)
+        self.assertEqual(snapshot["requests"]["total"], 2)
+        self.assertEqual(snapshot["requests"]["failed"], 1)
+        self.assertEqual(snapshot["requests"]["retries"], 1)
+        self.assertEqual(snapshot["error_categories"]["timeout"], 1)
+        self.assertEqual(snapshot["refresh_outcomes"]["unchanged"], 1)
+        self.assertEqual(snapshot["refresh_outcomes"]["modified"], 1)
+
+    def test_refresh_failure_safe_preservation(self):
+        # Verifies that a failed fetch carries forward previous claims without deleting valid data
+        prev_snapshot = CompanySnapshot(
+            snapshot_id="snap-1",
+            version=1,
+            organisation_number="923609016",
+            timestamp="2026-09-19T00:00:00Z",
+            claims={
+                "org:923609016|field:legal_name": SnapshotClaim(
+                    claim_key="org:923609016|field:legal_name",
+                    field_name="legal_name",
+                    value="Norsk Fiskeeksport AS",
+                ),
+                "org:923609016|field:website": SnapshotClaim(
+                    claim_key="org:923609016|field:website",
+                    field_name="website",
+                    value="https://norskfiske.no",
+                ),
+            },
+        )
+
+        # Failed refresh must not emit REMOVED changes
+        failed_res = RefreshResult(
+            success=False,
+            status=RefreshStatus.FAILED_FETCH,
+            snapshot=prev_snapshot,
+            changes=[],
+            failed_sources=["website"],
+            error_message="Network timeout on website refresh",
+        )
+
+        self.assertFalse(failed_res.success)
+        self.assertEqual(failed_res.status, RefreshStatus.FAILED_FETCH)
+        self.assertIsNotNone(failed_res.snapshot)
+        self.assertEqual(len(failed_res.snapshot.claims), 2)
+        self.assertEqual(len(failed_res.changes), 0)  # Zero false removals!
 
 
 if __name__ == "__main__":
