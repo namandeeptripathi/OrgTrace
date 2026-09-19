@@ -41,3 +41,17 @@ from .website_discovery import (
     score_candidate,
     verify_exact_entity,
 )
+from .profile_extraction import (
+    ExtractedCompanyProfile,
+    ExtractedField,
+    FieldStatus,
+    extract_careers,
+    extract_company_profile,
+    extract_contact,
+    extract_description,
+    extract_employees,
+    extract_industry,
+    extract_leadership,
+    extract_locations,
+    extract_news,
+)

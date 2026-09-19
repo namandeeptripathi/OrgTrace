@@ -29,7 +29,6 @@ The Stage 1 identity engine (`norway_company_agent.identity_engine`) establishes
 
 ## Stage 2 — Deterministic Website Discovery
 
-
 The Stage 2 discovery pipeline (`norway_company_agent.website_discovery`) finds the official website for a legally identified company without guessing:
 - **Registry Website Anchor**: Uses the Stage 1 BRREG entity record as the primary anchor. Normalizes and validates URLs against SSRF policies.
 - **Sitemap Discovery**: Safely discovers and parses `robots.txt` and `sitemap.xml` / sitemap indexes. Filters for high-signal paths (`about`, `om-oss`, `contact`, `kontakt`, `legal`) while excluding media and binary assets.
@@ -42,7 +41,20 @@ The Stage 2 discovery pipeline (`norway_company_agent.website_discovery`) finds 
 - **SSRF & Security Controls**: Every outbound request is protected by `assert_public_url`, blocking loopback, link-local, private/internal IP ranges, and unsafe schemes. Respects `robots.txt` and fails closed on unsafe resolution.
 - **Request-Budget Accounting**: Explicitly tracks total, search, robots, sitemap, page, redirect, and failed requests against configured caps (`RequestBudget`).
 
+## Stage 3 — Company Profile Extraction
 
+The Stage 3 profile extraction engine (`norway_company_agent.profile_extraction`) extracts evidence-attributed company profile fields from verified company sources without guessing or fabrication:
+- **Company Description**: Extracts official company descriptions with prioritized provenance: first-party JSON-LD (`Organization.description`), homepage meta/OpenGraph description, first-party `/om-oss` / `/about` text, and official BRREG activity/industry label fallback. Truncates cleanly and never duplicates boilerplate.
+- **Industry Classification**: Extracts authoritative NACE / Næringskode (`code`, `label`, system `NACE / Næringskode`) directly from BRREG as primary ground truth, supplemented by `schema.org` `industry` / `knowsAbout` metadata when available. Rejects weak or speculative industry guessing.
+- **Contact Details**: Normalizes postal addresses, 4-digit Norwegian postal codes (`postnummer`), cities (`poststed`/`kommune`), international and domestic phone numbers (`+47` formatting), and official company emails. Corroborates between BRREG business/postal addresses and first-party website contact pages.
+- **Locations & Subunits**: Identifies distinct company offices, branches, and establishments via official BRREG subunits (`underenheter`) and `schema.org` `LocalBusiness` entities. Deduplicates by normalized name, address line, and postal code; strictly rejects customer or client site confusion.
+- **Leadership & Governance**: Extracts key executives and board members (`daglig leder` / CEO, `styreleder` / Chair, `styremedlemmer`, `cfo`, `cto`, `gründer` / founder) from official BRREG public roles (`roller`) and structured `schema.org` person markup. Filters out inactive roles and arbitrary non-executive employees.
+- **Employees**: Extracts exact employee counts directly from BRREG or explicit structured data (`numberOfEmployees`). Accurately captures explicit ranges (e.g. `11-50 ansatte`) or minimums (`>100 ansatte`) from first-party text without synthetic estimation.
+- **Careers & Hiring**: Detects dedicated careers paths (`/karriere`, `/careers`, `/stillinger`). Distinguishes active hiring from explicit non-hiring notices (`ingen ledige stillinger`) without assuming hiring from page presence alone.
+- **News & Press Activity**: Extracts recent first-party news items and press releases from `/nyheter`, `/aktuelt`, `/pressemeldinger`, extracting article titles, URLs, and publication dates.
+- **Structured Data Integration**: Parses JSON-LD, Microdata, and OpenGraph with fallback manual parsing, indexing `Organization`, `Corporation`, `LocalBusiness`, `PostalAddress`, and `Person` records.
+- **Evidence Spans & Attribution**: Every field is wrapped in `ExtractedField[T]` with complete provenance: `field_name`, `value`, `status` (`found`, `not_found`, `unavailable`, `extraction_failed`), `source_url`, `source_type`, `evidence_span`, `confidence`, and `note`.
+- **Honest Abstention & Zero Fabrication**: Missing fields are never hallucinated or populated with placeholder values. Uncrawled or unprovided sources explicitly yield `unavailable`, while inspected sources lacking a given field yield `not_found`.
 
 ## Coverage limits
 

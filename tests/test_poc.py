@@ -68,6 +68,20 @@ from norway_company_agent.website_discovery import (  # noqa: E402
     score_candidate,
     verify_exact_entity,
 )
+from norway_company_agent.profile_extraction import (  # noqa: E402
+    ExtractedCompanyProfile,
+    ExtractedField,
+    FieldStatus,
+    extract_careers,
+    extract_company_profile,
+    extract_contact,
+    extract_description,
+    extract_employees,
+    extract_industry,
+    extract_leadership,
+    extract_locations,
+    extract_news,
+)
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
@@ -2265,7 +2279,358 @@ class Stage2WebsiteDiscoveryTests(unittest.TestCase):
             self.assertEqual(runs[0], runs[i], f"Non-deterministic discovery result at run {i + 1}")
 
 
+class Stage3ProfileExtractionTests(unittest.TestCase):
+    """Stage 3: Company Profile Extraction tests."""
+
+    def _make_base_profile(self, **kwargs):
+        base = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "municipality": "Bergen",
+            "industry_code": "03.111",
+            "industry_label": "Havfiske",
+            "employees": 42,
+            "evidence": {},
+        }
+        base.update(kwargs)
+        return base
+
+    def test_description_extraction(self):
+        profile = self._make_base_profile()
+
+        # 1. Description from JSON-LD
+        structured = {
+            "json-ld": [{
+                "@type": "Organization",
+                "name": "Norsk Fiskeeksport AS",
+                "description": "Ledende eksportør av førsteklasses norsk villfisk til det globale markedet.",
+            }]
+        }
+        website_val = {"final_url": "https://norskfiske.no/", "pages": []}
+        desc_field = extract_description(profile, website_val, structured, "https://norskfiske.no/")
+        self.assertEqual(desc_field.status, FieldStatus.FOUND)
+        self.assertIn("Ledende eksportør", desc_field.value or "")
+        self.assertEqual(desc_field.source_type, "website_jsonld")
+        self.assertGreater(desc_field.confidence, 0.9)
+
+        # 2. Description from meta description
+        meta_website = {
+            "final_url": "https://norskfiske.no/",
+            "description": "Norsk Fiskeeksport AS leverer bærekraftig sjømat fra Norskehavet.",
+            "pages": [],
+        }
+        desc_meta = extract_description(profile, meta_website, {"json-ld": []}, "https://norskfiske.no/")
+        self.assertEqual(desc_meta.status, FieldStatus.FOUND)
+        self.assertIn("bærekraftig sjømat", desc_meta.value or "")
+        self.assertEqual(desc_meta.source_type, "website_meta_description")
+
+        # 3. Description from about page text
+        about_website = {
+            "final_url": "https://norskfiske.no/",
+            "pages": [{
+                "url": "https://norskfiske.no/om-oss",
+                "main_text_excerpt": "Vi ble etablert i 1995 og har vokst til å bli en anerkjent leverandør av fersk fisk.",
+            }],
+        }
+        desc_about = extract_description(profile, about_website, {"json-ld": []}, "https://norskfiske.no/")
+        self.assertEqual(desc_about.status, FieldStatus.FOUND)
+        self.assertIn("anerkjent leverandør", desc_about.value or "")
+        self.assertEqual(desc_about.source_type, "website_about_page")
+
+        # 4. Fallback to registry industry label when website is unavailable
+        desc_fallback = extract_description(profile, None, {}, None)
+        self.assertEqual(desc_fallback.status, FieldStatus.FOUND)
+        self.assertEqual(desc_fallback.source_type, "official_registry")
+        self.assertIn("Havfiske", desc_fallback.value or "")
+
+        # 5. Not found when website inspected but empty
+        empty_website = {"final_url": "https://empty.no/", "pages": []}
+        desc_empty = extract_description({"name": "Empty AS"}, empty_website, {"json-ld": []}, "https://empty.no/")
+        self.assertEqual(desc_empty.status, FieldStatus.NOT_FOUND)
+        self.assertIsNone(desc_empty.value)
+
+    def test_industry_extraction(self):
+        # 1. Authoritative BRREG NACE industry
+        profile = self._make_base_profile()
+        ind_field = extract_industry(profile, None, {}, None)
+        self.assertEqual(ind_field.status, FieldStatus.FOUND)
+        self.assertEqual(ind_field.value["code"], "03.111")
+        self.assertEqual(ind_field.value["label"], "Havfiske")
+        self.assertEqual(ind_field.source_type, "official_registry")
+        self.assertEqual(ind_field.confidence, 1.0)
+
+        # 2. Schema.org JSON-LD industry
+        structured = {
+            "json-ld": [{
+                "@type": "Organization",
+                "name": "Tech Corp AS",
+                "industry": "Software Development & AI",
+            }]
+        }
+        ind_structured = extract_industry({"name": "Tech Corp AS"}, {"final_url": "https://tech.no/"}, structured, "https://tech.no/")
+        self.assertEqual(ind_structured.status, FieldStatus.FOUND)
+        self.assertIn("Software Development", ind_structured.value["label"])
+        self.assertEqual(ind_structured.source_type, "website_jsonld")
+
+        # 3. Unavailable when no source available
+        ind_unavail = extract_industry({}, None, {}, None)
+        self.assertEqual(ind_unavail.status, FieldStatus.UNAVAILABLE)
+        self.assertIsNone(ind_unavail.value)
+
+    def test_contact_extraction_and_normalization(self):
+        profile = self._make_base_profile(
+            business_address={"adresse": ["Strandgaten 12"], "postnummer": "5004", "poststed": "Bergen", "land": "Norge"}
+        )
+        website_val = {
+            "final_url": "https://norskfiske.no/",
+            "main_text_excerpt": "Kontakt oss på post@norskfiske.no eller telefon +47 55 12 34 56. Besøk oss i 5004 Bergen.",
+            "pages": [],
+        }
+        contact_field = extract_contact(profile, website_val, {"json-ld": []}, "https://norskfiske.no/")
+        self.assertEqual(contact_field.status, FieldStatus.FOUND)
+        self.assertEqual(contact_field.value["email"], "post@norskfiske.no")
+        self.assertIn("55 12 34 56", contact_field.value["phone"])
+        self.assertEqual(contact_field.value["postal_code"], "5004")
+        self.assertEqual(contact_field.value["city"], "Bergen")
+        self.assertEqual(contact_field.value["address"], "Strandgaten 12")
+
+        # Test unavailable vs not found
+        contact_unavail = extract_contact({}, None, {}, None)
+        self.assertEqual(contact_unavail.status, FieldStatus.UNAVAILABLE)
+
+        contact_empty = extract_contact({"name": "No Contact AS"}, {"final_url": "https://nocontact.no/", "pages": []}, {"json-ld": []}, "https://nocontact.no/")
+        self.assertEqual(contact_empty.status, FieldStatus.NOT_FOUND)
+
+    def test_multiple_locations_extraction_and_deduplication(self):
+        # 1. From official subunits
+        profile = self._make_base_profile(
+            evidence={
+                "locations": {
+                    "value": {
+                        "locations": [
+                            {"name": "Avdeling Bergen", "address": {"adresse": "Kai 4", "postnummer": "5003", "poststed": "Bergen"}},
+                            {"name": "Avdeling Tromsø", "address": {"adresse": "Havnegata 1", "postnummer": "9008", "poststed": "Tromsø"}},
+                            # Duplicate of Bergen
+                            {"name": "Avdeling Bergen", "address": {"adresse": "Kai 4", "postnummer": "5003", "poststed": "Bergen"}},
+                        ]
+                    }
+                }
+            }
+        )
+        loc_field = extract_locations(profile, None, {}, None)
+        self.assertEqual(loc_field.status, FieldStatus.FOUND)
+        self.assertEqual(len(loc_field.value), 2, "Duplicate locations must be deduplicated")
+        cities = [l["city"] for l in loc_field.value]
+        self.assertIn("Bergen", cities)
+        self.assertIn("Tromsø", cities)
+
+    def test_leadership_extraction_and_filtering(self):
+        # Official roles with leadership titles and non-leadership staff
+        profile = self._make_base_profile(
+            evidence={
+                "roles": {
+                    "value": {
+                        "roles": [
+                            {"name": "Ola Nordmann", "role": "Daglig leder", "inactive": False},
+                            {"name": "Kari Nordmann", "role": "Styreleder", "inactive": False},
+                            {"name": "Per Hansen", "role": "Varamedlem", "inactive": False},  # Non-leadership role
+                            {"name": "Inaktiv Leder", "role": "Daglig leder", "inactive": True},  # Inactive
+                        ]
+                    }
+                }
+            }
+        )
+        lead_field = extract_leadership(profile, None, {}, None)
+        self.assertEqual(lead_field.status, FieldStatus.FOUND)
+        names = [p["name"] for p in lead_field.value]
+        self.assertIn("Ola Nordmann", names)
+        self.assertIn("Kari Nordmann", names)
+        self.assertNotIn("Per Hansen", names, "Non-leadership roles must be excluded")
+        self.assertNotIn("Inaktiv Leder", names, "Inactive roles must be excluded")
+
+    def test_employee_count_extraction_and_ranges(self):
+        # 1. BRREG exact count
+        profile = self._make_base_profile(employees=42)
+        emp_reg = extract_employees(profile, None, {}, None)
+        self.assertEqual(emp_reg.status, FieldStatus.FOUND)
+        self.assertEqual(emp_reg.value, 42)
+        self.assertEqual(emp_reg.source_type, "official_registry")
+
+        # 2. JSON-LD range
+        structured_range = {
+            "json-ld": [{
+                "@type": "Organization",
+                "numberOfEmployees": {"@type": "QuantitativeValue", "minValue": 10, "maxValue": 50},
+            }]
+        }
+        emp_range = extract_employees({"name": "Range AS"}, {"final_url": "https://range.no/"}, structured_range, "https://range.no/")
+        self.assertEqual(emp_range.status, FieldStatus.FOUND)
+        self.assertEqual(emp_range.value, "10-50")
+        self.assertEqual(emp_range.source_type, "website_jsonld")
+
+        # 3. Website text exact
+        website_text = {"final_url": "https://text.no/", "main_text_excerpt": "Vi er i dag 25 ansatte fordelt på to kontorer.", "pages": []}
+        emp_text = extract_employees({"name": "Text AS"}, website_text, {"json-ld": []}, "https://text.no/")
+        self.assertEqual(emp_text.status, FieldStatus.FOUND)
+        self.assertEqual(emp_text.value, 25)
+        self.assertEqual(emp_text.source_type, "website_text")
+
+    def test_careers_detection(self):
+        # 1. Active careers page with job openings
+        website_careers = {
+            "final_url": "https://norskfiske.no/",
+            "pages": [{
+                "url": "https://norskfiske.no/karriere",
+                "main_text_excerpt": "Bli en del av vårt team! Vi søker dyktige medarbeidere:\n- Senior Eksportansvarlig\n- Kvalitetskontrollør",
+            }],
+        }
+        careers_field = extract_careers({"name": "Norsk Fiskeeksport AS"}, website_careers, "https://norskfiske.no/")
+        self.assertEqual(careers_field.status, FieldStatus.FOUND)
+        self.assertTrue(careers_field.value["has_careers_page"])
+        self.assertTrue(careers_field.value["hiring_active"])
+        self.assertIn("Senior Eksportansvarlig", careers_field.value["openings"])
+
+        # 2. Careers page with no open positions
+        website_no_jobs = {
+            "final_url": "https://norskfiske.no/",
+            "pages": [{
+                "url": "https://norskfiske.no/karriere",
+                "main_text_excerpt": "Vi har for øyeblikket ingen ledige stillinger.",
+            }],
+        }
+        careers_no_jobs = extract_careers({"name": "Norsk Fiskeeksport AS"}, website_no_jobs, "https://norskfiske.no/")
+        self.assertEqual(careers_no_jobs.status, FieldStatus.FOUND)
+        self.assertTrue(careers_no_jobs.value["has_careers_page"])
+        self.assertFalse(careers_no_jobs.value["hiring_active"])
+
+        # 3. No careers page
+        website_bare = {"final_url": "https://bare.no/", "pages": []}
+        careers_bare = extract_careers({"name": "Bare AS"}, website_bare, "https://bare.no/")
+        self.assertFalse(careers_bare.value["has_careers_page"])
+
+    def test_news_activity_extraction(self):
+        website_news = {
+            "final_url": "https://norskfiske.no/",
+            "pages": [
+                {
+                    "url": "https://norskfiske.no/nyheter/ny-fiskebat-kontrakt",
+                    "title": "Inngår ny kontrakt for fiskebåtleveranse",
+                    "main_text_excerpt": "2024-04-15: Norsk Fiskeeksport AS har i dag signert en ny avtale.",
+                },
+                {
+                    "url": "https://norskfiske.no/aktuelt/aarsresultat-2023",
+                    "title": "Rekordresultat for 2023",
+                    "main_text_excerpt": "2024-02-28: Selskapet oppnådde solid vekst i fjor.",
+                },
+            ],
+        }
+        news_field = extract_news({"name": "Norsk Fiskeeksport AS"}, website_news, "https://norskfiske.no/")
+        self.assertEqual(news_field.status, FieldStatus.FOUND)
+        self.assertEqual(len(news_field.value), 2)
+        titles = [item["title"] for item in news_field.value]
+        self.assertIn("Inngår ny kontrakt for fiskebåtleveranse", titles)
+        self.assertEqual(news_field.value[0]["date"], "2024-04-15")
+
+    def test_structured_data_jsonld_integration(self):
+        raw_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Norsk Fiskeeksport AS</title>
+            <script type="application/ld+json">
+            {
+                "@context": "https://schema.org",
+                "@type": "Corporation",
+                "name": "Norsk Fiskeeksport AS",
+                "description": "Totalleverandør av fersk og frossen fisk fra Vestlandet.",
+                "telephone": "+47 55 99 88 77",
+                "email": "kontakt@norskfiske.no",
+                "numberOfEmployees": 45,
+                "address": {
+                    "@type": "PostalAddress",
+                    "streetAddress": "Skuteviksbodene 1",
+                    "postalCode": "5035",
+                    "addressLocality": "Bergen",
+                    "addressCountry": "Norge"
+                },
+                "founder": {
+                    "@type": "Person",
+                    "name": "Lars Fisker",
+                    "jobTitle": "Founder & Managing Director"
+                }
+            }
+            </script>
+        </head>
+        <body>
+            <h1>Velkommen</h1>
+        </body>
+        </html>
+        """
+        profile = self._make_base_profile()
+        extracted = extract_company_profile(profile, html=raw_html)
+
+        self.assertEqual(extracted.description.status, FieldStatus.FOUND)
+        self.assertIn("Totalleverandør", extracted.description.value or "")
+        self.assertEqual(extracted.contact.value["email"], "kontakt@norskfiske.no")
+        self.assertEqual(extracted.contact.value["phone"], "+47 55 99 88 77")
+        self.assertEqual(extracted.contact.value["postal_code"], "5035")
+        self.assertEqual(extracted.employees.value, 42, "Authoritative BRREG employee count must be preserved")
+        self.assertTrue(any(p["name"] == "Lars Fisker" for p in extracted.leadership.value))
+        self.assertGreater(extracted.structured_data_summary["json_ld_entities_count"], 0)
+
+    def test_evidence_spans_and_provenance(self):
+        profile = self._make_base_profile()
+        website_val = {
+            "final_url": "https://norskfiske.no/",
+            "description": "Bærekraftig eksport av sjømat fra Norge.",
+            "main_text_excerpt": "Kontakt: info@norskfiske.no",
+            "pages": [],
+        }
+        profile["evidence"]["website"] = {"status": "available", "value": website_val}
+
+        extracted = extract_company_profile(profile)
+        # Every found field must have evidence_span and source_url
+        for field_obj in (extracted.description, extracted.industry, extracted.contact, extracted.employees):
+            if field_obj.status == FieldStatus.FOUND:
+                self.assertIsNotNone(field_obj.evidence_span)
+                self.assertIsNotNone(field_obj.source_url)
+                self.assertGreater(field_obj.confidence, 0.0)
+
+    def test_missing_vs_unavailable_handling(self):
+        # Empty profile with no evidence
+        profile = {"organisation_number": "999999999", "name": "Spøkelse AS", "evidence": {}}
+        extracted = extract_company_profile(profile)
+
+        self.assertEqual(extracted.description.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(extracted.industry.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(extracted.contact.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(extracted.employees.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(extracted.careers.status, FieldStatus.UNAVAILABLE)
+        self.assertEqual(extracted.news.status, FieldStatus.UNAVAILABLE)
+
+        # Profile with empty website crawled
+        profile_with_empty_web = {
+            "organisation_number": "999999999",
+            "name": "Spøkelse AS",
+            "evidence": {"website": {"status": "available", "value": {"final_url": "https://empty.test/", "pages": []}}},
+        }
+        extracted_empty = extract_company_profile(profile_with_empty_web)
+        self.assertEqual(extracted_empty.description.status, FieldStatus.NOT_FOUND)
+        self.assertEqual(extracted_empty.contact.status, FieldStatus.NOT_FOUND)
+        self.assertEqual(extracted_empty.employees.status, FieldStatus.NOT_FOUND)
+        self.assertEqual(extracted_empty.news.status, FieldStatus.NOT_FOUND)
+
+    def test_malformed_partial_pages(self):
+        # Broken HTML should not raise unhandled exceptions
+        broken_html = "<html><head><title>Broken<script>invalid json ld</script></head><body><<>>"
+        profile = self._make_base_profile()
+        extracted = extract_company_profile(profile, html=broken_html)
+        self.assertEqual(extracted.overall_status, "complete")
+        self.assertIsNotNone(extracted.description)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
