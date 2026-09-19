@@ -1330,6 +1330,193 @@ class VerifiedSiteSeedTests(unittest.TestCase):
             self.assertNotEqual(failed.returncode, 0)
             self.assertIn("unknown organisations", failed.stderr)
 
+class CompetitionBatchDiscoveryTests(unittest.TestCase):
+    """Tests for the discovery fallback inside the competition batch enrich() path."""
+
+    BATCH_MODULE = "scripts.run_competition_batch"
+
+    def _make_profile(self, *, website="", name="Norsk Fiskeeksport AS", org="923609016"):
+        return {
+            "organisation_number": org,
+            "name": name,
+            "website": website,
+            "municipality": "NOTODDEN",
+            "evidence": {"registry": evidence("registry", "available", "bulk", "https://example.test")},
+        }
+
+    def _fake_official(self, org, modules, fetcher=None):
+        return {}, []
+
+    def _fake_fetch_website_available(self, url, **kwargs):
+        return evidence("website", "available", "registry_linked_company_website", url, value={
+            "title": "Norsk Fiskeeksport AS",
+            "final_url": url,
+            "main_text_excerpt": "Seafood exporter in Notodden since 1985.",
+            "social_links": [],
+        }), {"requests": 2, "bytes": 5000, "latencies_ms": [100]}
+
+    def test_registry_website_present_skips_discovery(self):
+        """When the registry provides a website, the production enrich() must not call brave_search."""
+        import tempfile
+        import scripts.run_competition_batch as batch_mod
+
+        profile = self._make_profile(website="https://known.no")
+
+        brave_called = {"count": 0}
+
+        def mock_brave(*_args, **_kwargs):
+            brave_called["count"] += 1
+            return [], {"status": 0, "latency_ms": 0, "bytes": 0, "query_sha256": "x"}
+
+        def mock_profiles_from_bulk(_path, orgs):
+            return [dict(profile)], {"registry_snapshot_sha256": "a" * 64, "registry_rows_scanned": 1, "requested": 1, "selected": 1}
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            orgs_file = root / "orgs.txt"
+            orgs_file.write_text(profile["organisation_number"] + "\n")
+            output = root / "output.jsonl"
+            profiles_output = root / "profiles.jsonl"
+            report = root / "report.json"
+
+            saved_argv = sys.argv
+            try:
+                sys.argv = [
+                    "run_competition_batch.py",
+                    "--organisations", str(orgs_file),
+                    "--bulk", "/dev/null",
+                    "--output", str(output),
+                    "--profiles-output", str(profiles_output),
+                    "--report", str(report),
+                    "--run-id", "test-skip-discovery",
+                    "--expected-count", "1",
+                    "--modules", "registry,website",
+                    "--workers", "1",
+                ]
+                with patch.object(batch_mod, "brave_search", mock_brave), \
+                     patch.object(batch_mod, "fetch_website", self._fake_fetch_website_available), \
+                     patch.object(batch_mod, "fetch_official_modules", self._fake_official), \
+                     patch.object(batch_mod, "profiles_from_bulk", mock_profiles_from_bulk), \
+                     patch.dict("os.environ", {"BRAVE_SEARCH_API_KEY": "test-key"}):
+                    with self.assertRaises(SystemExit) as ctx:
+                        batch_mod.main()
+                    self.assertEqual(ctx.exception.code, 0, "Batch should exit cleanly")
+            finally:
+                sys.argv = saved_argv
+
+            self.assertEqual(brave_called["count"], 0, "brave_search must not be called when registry website exists")
+            result = json.loads(profiles_output.read_text().strip())
+            self.assertEqual(result["evidence"]["website"]["status"], "available")
+
+    def test_missing_website_valid_discovery_candidate(self):
+        """Missing website + valid search candidate + identity-verified → published as available."""
+        profile = self._make_profile(website="")
+        brave_api_key = "test-key"
+
+        search_results = [{
+            "url": "https://norskfiskeeksport.no/",
+            "title": "Norsk Fiskeeksport AS",
+            "snippet": "Seafood exporter 923609016 in Notodden",
+            "rank": 1,
+            "provider": "brave_search_api",
+            "query": "\"Norsk Fiskeeksport AS\" 923609016 NOTODDEN",
+        }]
+
+        website_record = evidence("website", "available", "registry_linked_company_website", "https://norskfiskeeksport.no/", value={
+            "title": "Norsk Fiskeeksport AS",
+            "final_url": "https://norskfiskeeksport.no/",
+            "main_text_excerpt": "Norsk Fiskeeksport AS is a leading seafood exporter based in Notodden, Norway.",
+            "social_links": [],
+        })
+
+        requested_modules = ["registry", "website"]
+        decision = choose_search_candidate(profile, search_results)
+        selected = decision.get("selected")
+        self.assertIsNotNone(selected, "The candidate should pass the crawl-candidate gate")
+
+        gated = apply_website_identity_gate(profile, website_record)
+        assessment = gated.get("assessment")
+        self.assertTrue(assessment["publishable"], "Identity should be verified for exact legal name match")
+
+        # Simulate the enrich() branch
+        website = gated["website"]
+        website["source_type"] = "search_discovered_company_website"
+        if assessment and assessment.get("publishable") and website.get("status") == "available":
+            profile["evidence"]["website"] = website
+
+        self.assertEqual(profile["evidence"]["website"]["status"], "available")
+        self.assertEqual(profile["evidence"]["website"]["source_type"], "search_discovered_company_website")
+
+    def test_missing_website_wrong_company_candidate(self):
+        """Missing website + crawled candidate fails identity gate → not_found, never published."""
+        profile = self._make_profile(website="", name="Norsk Fiskeeksport AS", org="923609016")
+        brave_api_key = "test-key"
+
+        search_results = [{
+            "url": "https://norskfiskeeksport.no/",
+            "title": "Norsk Fiskeeksport AS",
+            "snippet": "Seafood exporter 923609016 in Notodden",
+            "rank": 1,
+            "provider": "brave_search_api",
+            "query": "\"Norsk Fiskeeksport AS\" 923609016 NOTODDEN",
+        }]
+
+        # The crawled site belongs to a different company
+        website_record = evidence("website", "available", "registry_linked_company_website", "https://norskfiskeeksport.no/", value={
+            "title": "Totally Different Company",
+            "final_url": "https://norskfiskeeksport.no/",
+            "main_text_excerpt": "We are Totally Different Company providing unrelated services.",
+            "social_links": [],
+        })
+
+        decision = choose_search_candidate(profile, search_results)
+        selected = decision.get("selected")
+        self.assertIsNotNone(selected)
+
+        gated = apply_website_identity_gate(profile, website_record)
+        assessment = gated.get("assessment")
+        self.assertFalse(assessment["publishable"], "Identity must fail for a wrong-company page")
+
+        # Simulate the enrich() branch
+        website = gated["website"]
+        website["source_type"] = "search_discovered_company_website"
+        if assessment and assessment.get("publishable") and website.get("status") == "available":
+            profile["evidence"]["website"] = website
+        else:
+            profile["evidence"]["website"] = evidence(
+                "website", "not_found",
+                "search_discovered_company_website", selected["url"],
+                note="Search candidate crawled but exact-entity identity not verified",
+            )
+
+        self.assertEqual(profile["evidence"]["website"]["status"], "not_found")
+        self.assertIn("not verified", profile["evidence"]["website"]["note"])
+
+    def test_missing_website_no_candidate(self):
+        """Missing website + no search result passes scoring → not_found."""
+        profile = self._make_profile(website="")
+
+        # All results are on blocked hosts or irrelevant
+        search_results = [
+            {"url": "https://proff.no/selskap/norsk-fiskeeksport", "title": "Norsk Fiskeeksport AS", "snippet": "Directory", "rank": 1, "provider": "brave_search_api", "query": "test"},
+            {"url": "https://linkedin.com/company/norsk-fiskeeksport", "title": "Norsk Fiskeeksport AS", "snippet": "Social", "rank": 2, "provider": "brave_search_api", "query": "test"},
+        ]
+
+        decision = choose_search_candidate(profile, search_results)
+        selected = decision.get("selected")
+        self.assertIsNone(selected, "Blocked-host results must not become candidates")
+        self.assertTrue(decision["abstained"])
+
+        # Simulate the enrich() branch
+        profile["evidence"]["website"] = evidence(
+            "website", "not_found",
+            "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+            note="No search result passed the deterministic crawl-candidate gate",
+        )
+
+        self.assertEqual(profile["evidence"]["website"]["status"], "not_found")
+        self.assertIn("crawl-candidate gate", profile["evidence"]["website"]["note"])
+
 
 if __name__ == "__main__":
     unittest.main()

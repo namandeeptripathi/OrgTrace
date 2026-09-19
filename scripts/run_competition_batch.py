@@ -3,18 +3,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
-from norway_company_agent.evidence import utc_now  # noqa: E402
+from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
+from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
+from scripts.run_brave_discovery import brave_search  # noqa: E402
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -39,7 +43,12 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
+    parser.add_argument("--brave-api-key-env", default="BRAVE_SEARCH_API_KEY", help="Env var holding the Brave Search API key for discovery")
+    parser.add_argument("--discovery-timeout", type=float, default=15.0)
+    parser.add_argument("--discovery-count", type=int, default=10)
     args = parser.parse_args()
+
+    brave_api_key = os.environ.get(args.brave_api_key_env, "").strip()
 
     started_at = utc_now()
     organisation_inputs = read_organisation_inputs(args.organisations)
@@ -61,8 +70,56 @@ def main() -> None:
         profile["evidence"].update(records)
         website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
         if "website" in requested_modules:
-            website_record, website_metrics = fetch_website(profile.get("website"))
-            profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+            if profile.get("website"):
+                # Registry website exists — use the existing direct-fetch path.
+                website_record, website_metrics = fetch_website(profile.get("website"))
+                profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+            elif brave_api_key:
+                # No registry website — attempt discovery fallback.
+                search_results, search_op = brave_search(
+                    profile, brave_api_key,
+                    timeout=args.discovery_timeout, count=args.discovery_count,
+                )
+                # Count the Brave API request in the budget tracker.
+                website_metrics["requests"] += 1
+                website_metrics["bytes"] += search_op.get("bytes", 0)
+                if search_op.get("latency_ms"):
+                    website_metrics["latencies_ms"].append(search_op["latency_ms"])
+                decision = choose_search_candidate(profile, search_results)
+                selected = decision.get("selected")
+                if selected:
+                    website_record, crawl_metrics = fetch_website(selected["url"])
+                    website_metrics["requests"] += crawl_metrics["requests"]
+                    website_metrics["bytes"] += crawl_metrics["bytes"]
+                    website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
+                    gated = apply_website_identity_gate(profile, website_record)
+                    website = gated["website"]
+                    assessment = gated.get("assessment")
+                    website["source_type"] = "search_discovered_company_website"
+                    if assessment and assessment.get("publishable") and website.get("status") == "available":
+                        profile["evidence"]["website"] = website
+                    else:
+                        # Identity not confirmed — record not_found, never publish unverified content.
+                        profile["evidence"]["website"] = evidence(
+                            "website", "not_found",
+                            "search_discovered_company_website", selected["url"],
+                            note="Search candidate crawled but exact-entity identity not verified",
+                        )
+                else:
+                    # No candidate survived scoring.
+                    profile["evidence"]["website"] = evidence(
+                        "website", "not_found",
+                        "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                        note="No search result passed the deterministic crawl-candidate gate",
+                    )
+            else:
+                # No registry website and no API key available.
+                profile["evidence"]["website"] = evidence(
+                    "website", "not_found",
+                    "registry_linked_company_website",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter",
+                    note="No valid registry website URL",
+                )
         metric = {
             "requests": len(metrics) + website_metrics["requests"],
             "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
