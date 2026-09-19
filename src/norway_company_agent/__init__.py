@@ -82,5 +82,37 @@ from .evidence_engine import (
     validate_claim_evidence,
     verify_snapshot_match,
 )
+from .external_research import (
+    CandidateType,
+    ExternalFootprintCategory,
+    ExternalFootprintItem,
+    ExternalFootprintProfile,
+    LeadershipEntity,
+    LeadershipRoleType,
+    ResearchCandidate,
+    SourcePolicyDecision,
+    SourcePolicyStatus,
+    build_external_footprint,
+    classify_leadership_role,
+    discover_leadership,
+    evaluate_source_policy,
+    generate_research_candidates,
+    normalize_domain_for_research,
+    normalize_url_for_research,
+)
+from .change_intelligence import (
+    ChangeType,
+    CompanySnapshot,
+    MaterialChangeRecord,
+    MemorySnapshotStore,
+    RefreshResult,
+    RefreshStatus,
+    SnapshotClaim,
+    compare_snapshots,
+    generate_stable_claim_key,
+    is_material_change,
+    normalize_semantic_value,
+    refresh_company_intelligence,
+)
 
 

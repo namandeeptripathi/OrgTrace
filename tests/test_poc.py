@@ -110,6 +110,38 @@ from norway_company_agent.evidence_engine import (  # noqa: E402
     validate_claim_evidence,
     verify_snapshot_match,
 )
+from norway_company_agent.external_research import (  # noqa: E402
+    CandidateType,
+    ExternalFootprintCategory,
+    ExternalFootprintItem,
+    ExternalFootprintProfile,
+    LeadershipEntity,
+    LeadershipRoleType,
+    ResearchCandidate,
+    SourcePolicyDecision,
+    SourcePolicyStatus,
+    build_external_footprint,
+    classify_leadership_role,
+    discover_leadership,
+    evaluate_source_policy,
+    generate_research_candidates,
+    normalize_domain_for_research,
+    normalize_url_for_research,
+)
+from norway_company_agent.change_intelligence import (  # noqa: E402
+    ChangeType,
+    CompanySnapshot,
+    MaterialChangeRecord,
+    MemorySnapshotStore,
+    RefreshResult,
+    RefreshStatus,
+    SnapshotClaim,
+    compare_snapshots,
+    generate_stable_claim_key,
+    is_material_change,
+    normalize_semantic_value,
+    refresh_company_intelligence,
+)
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.snapshots import SnapshotFetcher  # noqa: E402
@@ -3299,6 +3331,544 @@ class Stage5EvidenceProvenanceTests(unittest.TestCase):
         self.assertEqual(claim_rev.value, 100000000)
         self.assertEqual(claim_rev.reporting_period, "2024")
         self.assertEqual(claim_rev.extraction_method, ExtractionMethod.FINANCIAL_STATEMENT)
+class Stage6ExternalResearchTests(unittest.TestCase):
+    """Stage 6: External Research & Enrichment Engine tests."""
+
+    def setUp(self):
+        self.target = {
+            "organisation_number": "923609016",
+            "name": "Norsk Fiskeeksport AS",
+            "municipality": "Bergen",
+            "website": "https://norskfiske.no",
+        }
+
+    def test_candidate_generation_and_normalization(self):
+        search_results = [
+            {
+                "url": "https://norskfiske.no/om-oss?utm_source=google&utm_medium=cpc",
+                "title": "Om Norsk Fiskeeksport AS - Vår historie",
+                "snippet": "Norsk Fiskeeksport AS (org 923609016) leverer fersk laks fra Vestlandet.",
+                "rank": 1,
+            },
+            {
+                "url": "https://e24.no/naeringsliv/i/12345/norsk-fiskeeksport-oeker-eksporten",
+                "title": "Norsk Fiskeeksport øker eksporten til Asia",
+                "snippet": "Bergensbedriften Norsk Fiskeeksport melder om rekordvekst.",
+                "rank": 2,
+            },
+        ]
+        candidates = generate_research_candidates(self.target, search_results=search_results)
+        self.assertEqual(len(candidates), 2)
+
+        cand1 = candidates[0]
+        # Tracking params stripped, normalized
+        self.assertEqual(cand1.normalized_url, "https://norskfiske.no/om-oss")
+        self.assertEqual(cand1.domain, "norskfiske.no")
+        self.assertTrue(cand1.is_candidate_only)
+        self.assertEqual(cand1.candidate_type, CandidateType.WEBSITE)
+
+        cand2 = candidates[1]
+        self.assertEqual(cand2.domain, "e24.no")
+        self.assertEqual(cand2.candidate_type, CandidateType.FOOTPRINT)
+
+    def test_candidate_deduplication(self):
+        search_results = [
+            {
+                "url": "https://norskfiske.no/om-oss?utm_source=bing",
+                "title": "Om oss 1",
+                "snippet": "Snippet 1",
+                "rank": 1,
+            },
+            {
+                "url": "https://norskfiske.no/om-oss?utm_source=google",
+                "title": "Om oss 2",
+                "snippet": "Snippet 2",
+                "rank": 2,
+            },
+            {
+                "url": "https://norskfiske.no/om-oss/",
+                "title": "Om oss 3",
+                "snippet": "Snippet 3",
+                "rank": 3,
+            },
+        ]
+        candidates = generate_research_candidates(self.target, search_results=search_results)
+        self.assertEqual(len(candidates), 1, "Duplicate normalized URLs must be deduplicated")
+        self.assertEqual(candidates[0].normalized_url, "https://norskfiske.no/om-oss")
+
+    def test_candidate_provenance_preservation(self):
+        search_results = [
+            {
+                "url": "https://norskfiske.no/kontakt",
+                "title": "Kontakt oss",
+                "snippet": "Kontaktinformasjon for Norsk Fiskeeksport AS",
+                "query": "Norsk Fiskeeksport AS kontakt",
+                "engine": "brave_search",
+                "rank": 1,
+            }
+        ]
+        candidates = generate_research_candidates(self.target, search_results=search_results)
+        self.assertEqual(len(candidates), 1)
+        c = candidates[0]
+        self.assertEqual(c.search_query, "Norsk Fiskeeksport AS kontakt")
+        self.assertEqual(c.source_engine, "brave_search")
+        self.assertEqual(c.rank, 1)
+        self.assertTrue(c.candidate_id.startswith("cand-"))
+        self.assertTrue(c.retrieved_at.endswith("Z"))
+
+    def test_search_snippet_never_verified_fact(self):
+        search_results = [
+            {
+                "url": "https://some-blog.test/post",
+                "title": "Norsk Fiskeeksport har 100 ansatte",
+                "snippet": "I følge rykter har Norsk Fiskeeksport AS 100 ansatte.",
+                "rank": 1,
+            }
+        ]
+        candidates = generate_research_candidates(self.target, search_results=search_results)
+        self.assertEqual(len(candidates), 1)
+        # Marked candidate only
+        self.assertTrue(candidates[0].is_candidate_only)
+        # Attempting to discover leadership or facts from weak search snippets alone yields no verified claim
+        discovered_leads = discover_leadership(self.target, [{"source_url": candidates[0].url, "source_type": "search_candidate", "roles": [{"name": "Ola Nordmann", "role": "Daglig leder"}]}])
+        self.assertEqual(len(discovered_leads), 0, "Search candidate sources must never manufacture verified leadership")
+
+    def test_permitted_sources_accepted(self):
+        target_domains = {"norskfiske.no"}
+        # 1. Government registry
+        p_gov = evaluate_source_policy("https://data.brreg.no/enhetsregisteret/api/enheter/923609016")
+        self.assertEqual(p_gov.status, SourcePolicyStatus.PERMITTED)
+        self.assertTrue(p_gov.is_allowed)
+
+        # 2. First-party domain
+        p_fp = evaluate_source_policy("https://norskfiske.no/om-oss", target_domains=target_domains)
+        self.assertEqual(p_fp.status, SourcePolicyStatus.PERMITTED)
+        self.assertTrue(p_fp.is_allowed)
+
+        # 3. Reputable news
+        p_news = evaluate_source_policy("https://e24.no/naeringsliv/i/xyz/artikkel")
+        self.assertEqual(p_news.status, SourcePolicyStatus.PERMITTED)
+        self.assertTrue(p_news.is_allowed)
+
+    def test_restricted_and_scraping_sources_rejected(self):
+        # Restricted social & job boards
+        blocked = [
+            "https://www.linkedin.com/company/norskfiske",
+            "https://www.facebook.com/norskfiske",
+            "https://www.instagram.com/norskfiske",
+            "https://www.tiktok.com/@norskfiske",
+            "https://www.glassdoor.com/Overview/norskfiske",
+            "https://no.indeed.com/cmp/norskfiske",
+            "https://proff.no/selskap/norsk-fiskeeksport-as/IF123",
+            "https://purehelp.no/m/company/details/923609016",
+        ]
+        for url in blocked:
+            decision = evaluate_source_policy(url)
+            self.assertEqual(decision.status, SourcePolicyStatus.REJECTED, f"URL {url} must be rejected")
+            self.assertFalse(decision.is_allowed)
+            self.assertTrue(decision.prohibits_scraping)
+
+    def test_leadership_discovery_with_exact_entity(self):
+        sources_data = [
+            {
+                "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/923609016/roller",
+                "source_type": "official_roles",
+                "roles": [
+                    {
+                        "name": "Kari Nordmann",
+                        "role": "Daglig leder",
+                        "organisation_number": "923609016",
+                        "company_name": "Norsk Fiskeeksport AS",
+                        "evidence_span": "Daglig leder: Kari Nordmann",
+                    },
+                    {
+                        "name": "Per Olsen",
+                        "role": "Styreleder",
+                        "organisation_number": "923609016",
+                        "company_name": "Norsk Fiskeeksport AS",
+                        "evidence_span": "Styreleder: Per Olsen",
+                    },
+                ],
+            }
+        ]
+        leaders = discover_leadership(self.target, sources_data)
+        self.assertEqual(len(leaders), 2)
+
+        by_role = {l.role_type: l for l in leaders}
+        self.assertIn(LeadershipRoleType.DAGLIG_LEDER, by_role)
+        self.assertEqual(by_role[LeadershipRoleType.DAGLIG_LEDER].person_name, "Kari Nordmann")
+        self.assertEqual(by_role[LeadershipRoleType.DAGLIG_LEDER].status, "verified")
+
+        self.assertIn(LeadershipRoleType.STYRELEDER, by_role)
+        self.assertEqual(by_role[LeadershipRoleType.STYRELEDER].person_name, "Per Olsen")
+
+    def test_leadership_avoids_name_collision_without_proof(self):
+        # Person with same name at a different company (different org number)
+        sources_data = [
+            {
+                "source_url": "https://data.brreg.no/enhetsregisteret/api/enheter/999888777/roller",
+                "source_type": "official_roles",
+                "roles": [
+                    {
+                        "name": "Kari Nordmann",
+                        "role": "Daglig leder",
+                        "organisation_number": "999888777",  # Different company!
+                        "company_name": "Helt Annen Bedrift AS",
+                    }
+                ],
+            }
+        ]
+        leaders = discover_leadership(self.target, sources_data)
+        self.assertEqual(len(leaders), 0, "Leadership at different company must never be attributed to target")
+
+    def test_social_video_policy_declared_only(self):
+        # 1. Declared YouTube link from company website
+        declared_links = [
+            {"platform": "youtube", "url": "https://www.youtube.com/c/NorskFiskeeksport"}
+        ]
+        footprint = build_external_footprint([], declared_links=declared_links, target_entity=self.target)
+        video_items = [item for item in footprint.items if item.category == ExternalFootprintCategory.VIDEO_REFERENCE]
+        self.assertEqual(len(video_items), 1)
+        self.assertTrue(video_items[0].is_verified)
+        self.assertEqual(video_items[0].domain, "youtube.com")
+
+        # 2. Undeclared / search hit video requires verification
+        p_undeclared = evaluate_source_policy("https://www.youtube.com/watch?v=12345")
+        self.assertEqual(p_undeclared.status, SourcePolicyStatus.REQUIRES_VERIFICATION)
+        self.assertTrue(p_undeclared.requires_official_verification)
+
+    def test_social_platform_scraping_strictly_rejected(self):
+        decision = evaluate_source_policy(
+            "https://www.linkedin.com/company/norskfiske/jobs",
+            acquisition_mode="unauthorized_scraping",
+        )
+        self.assertEqual(decision.status, SourcePolicyStatus.REJECTED)
+        self.assertFalse(decision.is_allowed)
+        self.assertTrue(decision.prohibits_scraping)
+        self.assertIn("prohibits unauthorized scraping", decision.reason)
+
+    def test_external_footprint_normalization_and_categorization(self):
+        target_domains = {"norskfiske.no"}
+        candidates = [
+            ResearchCandidate(
+                candidate_id="c1",
+                url="https://norskfiske.no/",
+                normalized_url="https://norskfiske.no",
+                domain="norskfiske.no",
+                candidate_type=CandidateType.WEBSITE,
+                title="Hjemmeside",
+                snippet="Velkommen",
+                search_query="q",
+                source_engine="search",
+                policy_decision=evaluate_source_policy("https://norskfiske.no/", target_domains=target_domains),
+                is_candidate_only=False,
+            ),
+            ResearchCandidate(
+                candidate_id="c2",
+                url="https://e24.no/artikkel/123",
+                normalized_url="https://e24.no/artikkel/123",
+                domain="e24.no",
+                candidate_type=CandidateType.FOOTPRINT,
+                title="Nyhet",
+                snippet="Omtale",
+                search_query="q",
+                source_engine="search",
+                policy_decision=evaluate_source_policy("https://e24.no/artikkel/123"),
+                is_candidate_only=True,
+            ),
+            # Rejected source: aggregator
+            ResearchCandidate(
+                candidate_id="c3",
+                url="https://proff.no/selskap/123",
+                normalized_url="https://proff.no/selskap/123",
+                domain="proff.no",
+                candidate_type=CandidateType.COMPANY_PROFILE,
+                title="Proff",
+                snippet="Regnskap",
+                search_query="q",
+                source_engine="search",
+                policy_decision=evaluate_source_policy("https://proff.no/selskap/123"),
+                is_candidate_only=True,
+            ),
+        ]
+        footprint = build_external_footprint(candidates, target_entity=self.target)
+        self.assertEqual(footprint.total_items, 2, "Rejected candidates must not be included in active footprint")
+        self.assertEqual(len(footprint.rejected_items), 1)
+        self.assertIn("proff.no", footprint.rejected_items[0]["url"])
+        self.assertEqual(footprint.category_counts.get("official_website"), 1)
+        self.assertEqual(footprint.category_counts.get("news_publication"), 1)
+
+    def test_source_policy_centralized_decisions(self):
+        # SSRF / local address rejection
+        p_local = evaluate_source_policy("http://localhost:8080/admin")
+        self.assertEqual(p_local.status, SourcePolicyStatus.REJECTED)
+        self.assertIn("ssrf", p_local.matched_rule.lower())
+
+        p_ip = evaluate_source_policy("http://192.168.1.1/secret")
+        self.assertEqual(p_ip.status, SourcePolicyStatus.REJECTED)
+
+        p_scheme = evaluate_source_policy("ftp://files.test/file")
+        self.assertEqual(p_scheme.status, SourcePolicyStatus.REJECTED)
+
+    def test_evidence_pipeline_separation(self):
+        # Candidate discovery -> Source policy validation -> Claim creation
+        search_hits = [
+            {"url": "https://norskfiske.no/om-oss", "title": "Om oss", "snippet": "Norsk Fiskeeksport AS ble stiftet i 2019."}
+        ]
+        candidates = generate_research_candidates(self.target, search_results=search_hits)
+        cand = candidates[0]
+
+        # 1. Candidate is not a verified claim
+        self.assertTrue(cand.is_candidate_only)
+
+        # 2. Source policy validated
+        self.assertEqual(cand.policy_decision.status, SourcePolicyStatus.PERMITTED)
+
+        # 3. Footprint generated
+        fp = build_external_footprint(candidates, target_entity=self.target)
+        self.assertEqual(len(fp.items), 1)
+
+    def test_weak_source_handling_and_no_fabricated_claims(self):
+        # No roles present in source -> empty leadership returned, no hallucinated roles
+        sources_empty = [{"source_url": "https://data.brreg.no/api", "source_type": "official_roles", "roles": []}]
+        leaders = discover_leadership(self.target, sources_empty)
+        self.assertEqual(len(leaders), 0)
+
+
+class Stage7ChangeIntelligenceTests(unittest.TestCase):
+    """Stage 7: Refresh & Change Intelligence Engine tests."""
+
+    def setUp(self):
+        self.org = "923609016"
+
+    def test_stable_claim_key_generation_deterministic(self):
+        key1 = generate_stable_claim_key(self.org, "legal_name")
+        key2 = generate_stable_claim_key(self.org, "LEGAL_NAME")
+        key3 = generate_stable_claim_key(self.org, "legal-name")
+        self.assertEqual(key1, "org:923609016|field:legal_name")
+        self.assertEqual(key1, key2)
+        self.assertEqual(key1, key3)
+
+        # Entity qualifier
+        k_role = generate_stable_claim_key(self.org, "leadership", "daglig_leder:Kari Nordmann")
+        self.assertEqual(k_role, "org:923609016|field:leadership|entity:daglig_leder_kari_nordmann")
+
+        # Period qualifier
+        k_fin = generate_stable_claim_key(self.org, "revenue", "2024")
+        self.assertEqual(k_fin, "org:923609016|field:revenue|entity:2024")
+
+    def test_stable_claim_key_ignores_timestamps_and_ids(self):
+        # Verify key is strictly semantic and contains no timestamps, random UUIDs, or fetch IDs
+        key = generate_stable_claim_key(" 923 609 016 ", "employees")
+        self.assertEqual(key, "org:923609016|field:employees")
+        self.assertNotIn("T", key)
+        self.assertNotIn(":", key.replace("org:923609016|field:employees", ""))
+
+    def test_immutable_snapshots_cannot_be_mutated(self):
+        claim = SnapshotClaim(
+            claim_key="org:923609016|field:legal_name",
+            field_name="legal_name",
+            value="Norsk Fiskeeksport AS",
+        )
+        snapshot = CompanySnapshot(
+            snapshot_id="snapshot-923609016-v1",
+            version=1,
+            organisation_number=self.org,
+            timestamp="2026-09-20T00:00:00Z",
+            claims={"org:923609016|field:legal_name": claim},
+        )
+        # Attempting to reassign an attribute raises AttributeError
+        with self.assertRaises(AttributeError):
+            snapshot.version = 2
+
+        with self.assertRaises(AttributeError):
+            snapshot.organisation_number = "999888777"
+
+    def test_previous_vs_current_comparison_all_change_types(self):
+        # Previous snapshot with 3 claims: legal_name, employees, website
+        c_name = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS")
+        c_emp_old = SnapshotClaim("org:923609016|field:employees", "employees", 40)
+        c_web = SnapshotClaim("org:923609016|field:website", "website", "https://norskfiske.no")
+        snap_v1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {
+            c_name.claim_key: c_name,
+            c_emp_old.claim_key: c_emp_old,
+            c_web.claim_key: c_web,
+        })
+
+        # Current snapshot:
+        # legal_name: unchanged
+        # employees: modified (40 -> 45)
+        # website: removed
+        # revenue: added
+        c_emp_new = SnapshotClaim("org:923609016|field:employees", "employees", 45)
+        c_rev = SnapshotClaim("org:923609016|field:revenue", "revenue", 50000000)
+        snap_v2 = CompanySnapshot("snap-2", 2, self.org, "2026-09-20T00:00:00Z", {
+            c_name.claim_key: c_name,
+            c_emp_new.claim_key: c_emp_new,
+            c_rev.claim_key: c_rev,
+        })
+
+        changes = compare_snapshots(snap_v1, snap_v2)
+        by_key = {c.stable_claim_key: c for c in changes}
+
+        # 1. UNCHANGED: legal_name
+        self.assertEqual(by_key["org:923609016|field:legal_name"].change_type, ChangeType.UNCHANGED)
+
+        # 2. MODIFIED: employees
+        self.assertEqual(by_key["org:923609016|field:employees"].change_type, ChangeType.MODIFIED)
+        self.assertEqual(by_key["org:923609016|field:employees"].previous_value, 40)
+        self.assertEqual(by_key["org:923609016|field:employees"].current_value, 45)
+
+        # 3. REMOVED: website
+        self.assertEqual(by_key["org:923609016|field:website"].change_type, ChangeType.REMOVED)
+        self.assertEqual(by_key["org:923609016|field:website"].previous_value, "https://norskfiske.no")
+
+        # 4. ADDED: revenue
+        self.assertEqual(by_key["org:923609016|field:revenue"].change_type, ChangeType.ADDED)
+        self.assertEqual(by_key["org:923609016|field:revenue"].current_value, 50000000)
+
+    def test_material_change_detection_semantic_only(self):
+        # Meaningful changes
+        self.assertTrue(is_material_change(100, 200, "revenue"))
+        self.assertTrue(is_material_change("Bergen", "Oslo", "municipality"))
+        self.assertTrue(is_material_change("Active", "Dissolved", "status"))
+
+        # Incidental formatting changes
+        self.assertFalse(is_material_change(100.00001, 100.00002, "score"))
+        self.assertFalse(is_material_change("Norsk Fiskeeksport", "Norsk  Fiskeeksport", "name"))
+
+    def test_false_change_prevention_whitespace_and_case(self):
+        # Whitespace differences
+        self.assertFalse(is_material_change("Norsk Fiskeeksport AS", "  Norsk   Fiskeeksport AS  ", "name"))
+
+        # Case differences for case-insensitive fields
+        self.assertFalse(is_material_change("AS", "as", "legal_form"))
+        self.assertFalse(is_material_change("BERGEN", "Bergen", "municipality"))
+        self.assertFalse(is_material_change("post@norskfiske.no", "POST@NORSKFISKE.NO", "email"))
+
+    def test_false_change_prevention_dict_and_list_ordering(self):
+        # Dict key order
+        dict_a = {"alpha": 1, "beta": 2, "gamma": 3}
+        dict_b = {"gamma": 3, "alpha": 1, "beta": 2}
+        self.assertFalse(is_material_change(dict_a, dict_b, "metadata"))
+
+        # List order for set-like items
+        list_a = ["https://youtube.com/c/1", "https://norskfiske.no"]
+        list_b = ["https://norskfiske.no", "https://youtube.com/c/1"]
+        self.assertFalse(is_material_change(list_a, list_b, "links"))
+
+    def test_false_change_prevention_url_canonicalization(self):
+        # URL normalization: trailing slash and tracking query params
+        url_a = "https://norskfiske.no/"
+        url_b = "https://norskfiske.no"
+        url_c = "https://norskfiske.no/?utm_source=google&utm_medium=cpc"
+        self.assertFalse(is_material_change(url_a, url_b, "website"))
+        self.assertFalse(is_material_change(url_a, url_c, "website"))
+
+    def test_failed_refresh_preserves_previous_snapshot(self):
+        # Known-good snapshot
+        claim = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS")
+        snap_v1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {claim.claim_key: claim})
+
+        # Complete refresh failure (retrieval error)
+        result = refresh_company_intelligence(
+            previous_snapshot=snap_v1,
+            new_claims=None,
+            retrieval_error="HTTP 500: BRREG internal server error",
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, RefreshStatus.FAILED_FETCH)
+        self.assertEqual(result.snapshot, snap_v1, "Previous known-good snapshot must be preserved")
+        self.assertEqual(len(result.changes), 0, "No false changes must be generated on failure")
+
+    def test_failed_refresh_no_false_removals(self):
+        # Known-good snapshot with multiple claims
+        c1 = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS")
+        c2 = SnapshotClaim("org:923609016|field:revenue", "revenue", 50000000)
+        snap_v1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {c1.claim_key: c1, c2.claim_key: c2})
+
+        # Transient network timeout
+        result = refresh_company_intelligence(
+            previous_snapshot=snap_v1,
+            new_claims=None,
+            source_results={"registry": "timeout", "website": "timeout"},
+        )
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, RefreshStatus.TRANSIENT_ERROR)
+        self.assertEqual(result.snapshot, snap_v1)
+        # ZERO false removals!
+        self.assertEqual(len(result.changes), 0)
+
+    def test_partial_source_failure_preserves_unreached_claims(self):
+        # Registry claims + Website claims
+        c_reg = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS", source_module="registry")
+        c_web = SnapshotClaim("org:923609016|field:description", "description", "Fersk laks fra Bergen", source_module="website")
+        snap_v1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {
+            c_reg.claim_key: c_reg,
+            c_web.claim_key: c_web,
+        })
+
+        # Next run: registry succeeded with updated legal_name; website timed out!
+        c_reg_new = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport ASA", source_module="registry")
+        result = refresh_company_intelligence(
+            previous_snapshot=snap_v1,
+            new_claims=[c_reg_new],
+            source_results={"registry": "available", "website": "timeout"},
+        )
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, RefreshStatus.PARTIAL_FAILURE)
+        self.assertIn("website", result.failed_sources)
+
+        # In new snapshot: website claim was preserved, NOT falsely removed!
+        self.assertIn("org:923609016|field:description", result.snapshot.claims)
+        self.assertEqual(result.snapshot.claims["org:923609016|field:description"].value, "Fersk laks fra Bergen")
+
+        # In changes: legal_name was MODIFIED; description was UNCHANGED (not REMOVED!)
+        by_key = {c.stable_claim_key: c for c in result.changes}
+        self.assertEqual(by_key["org:923609016|field:legal_name"].change_type, ChangeType.MODIFIED)
+        self.assertEqual(by_key["org:923609016|field:description"].change_type, ChangeType.UNCHANGED)
+
+    def test_idempotent_reruns_no_duplicate_changes(self):
+        claim = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS")
+        snap_v1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {claim.claim_key: claim})
+
+        # Run 1: identical claims
+        res1 = refresh_company_intelligence(
+            previous_snapshot=snap_v1,
+            new_claims=[claim],
+            source_results={"registry": "available"},
+        )
+        # All changes are UNCHANGED
+        self.assertTrue(all(c.change_type == ChangeType.UNCHANGED for c in res1.changes))
+
+        # Run 2: identical claims again
+        res2 = refresh_company_intelligence(
+            previous_snapshot=res1.snapshot,
+            new_claims=[claim],
+            source_results={"registry": "available"},
+        )
+        self.assertTrue(all(c.change_type == ChangeType.UNCHANGED for c in res2.changes))
+        self.assertEqual(len(res1.changes), len(res2.changes))
+
+    def test_snapshot_store_history_and_versioning(self):
+        store = MemorySnapshotStore()
+        c1 = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport AS")
+        snap1 = CompanySnapshot("snap-1", 1, self.org, "2026-01-01T00:00:00Z", {c1.claim_key: c1})
+        store.save_snapshot(snap1)
+
+        c2 = SnapshotClaim("org:923609016|field:legal_name", "legal_name", "Norsk Fiskeeksport ASA")
+        snap2 = CompanySnapshot("snap-2", 2, self.org, "2026-06-01T00:00:00Z", {c2.claim_key: c2})
+        store.save_snapshot(snap2)
+
+        latest = store.get_latest_snapshot(self.org)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.version, 2)
+        self.assertEqual(latest.claims["org:923609016|field:legal_name"].value, "Norsk Fiskeeksport ASA")
+
+        history = store.get_snapshot_history(self.org)
+        self.assertEqual(len(history), 2)
+        self.assertEqual(history[0].version, 1)
+        self.assertEqual(history[1].version, 2)
 
 
 if __name__ == "__main__":

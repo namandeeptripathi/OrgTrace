@@ -99,6 +99,39 @@ The Stage 5 evidence & provenance engine (`norway_company_agent.evidence_engine`
   - Rejects claims where the evidence span is not present in the source content.
   - Rejects unsafe or private network URLs via SSRF validation (`assert_public_url`).
 
+## Stage 6 — External Research & Enrichment
+
+The Stage 6 external research and enrichment engine (`norway_company_agent.external_research`) provides lawful, policy-governed candidate generation and public footprint enrichment:
+- **Search-Based Candidate Generation**: Generates candidates for official websites, leadership/founders, company profiles, external footprint, and permitted video/social references. Normalizes schemes, hostnames, ports, paths, and strips tracking parameters (`utm_*`, `gclid`, `fbclid`). Deduplicates candidates deterministically while preserving query, rank, engine, and provenance metadata. Search snippets are strictly flagged `is_candidate_only=True` and are never treated as verified facts alone.
+- **Centralized Source Policy Enforcement**: Evaluates candidates centrally via `evaluate_source_policy` before downstream consumption. Implements explicit allowlists:
+  - *Permitted*: Official registries (`brreg.no`, `data.brreg.no`, `lovdata.no`, `ssb.no`), verified first-party company domains, and reputable news publications (`e24.no`, `dn.no`, `finansavisen.no`, `nrk.no`, etc.).
+  - *Requires Verification*: Permitted video platforms (`youtube.com`, `youtu.be`) for declared or verified channels.
+  - *Rejected / Restricted*: Prohibits scraping or direct ingestion from restricted platforms (`linkedin.com`, `facebook.com`, `instagram.com`, `tiktok.com`, `glassdoor.com`, `indeed.com`, and aggregators like `proff.no`, `purehelp.no`, `180.no`).
+  - *SSRF Safety*: Rejects local, loopback, private IP ranges, and unsafe schemes.
+- **Identity-Safe Leadership Discovery**: Discovers founders, executives, and directors (`daglig leder`, `styreleder`, `styremedlem`, `grunnlegger`) from authoritative sources (BRREG roller and first-party company pages). Fails closed against name collisions across different entities by requiring matching organisation numbers or legal company names in the source evidence.
+- **Social & Video Discovery**: Ingests social and video references exclusively through first-party declared links (e.g. YouTube channels or social handles found on verified company websites). Strictly enforces zero unauthorized scraping of restricted social platforms.
+- **Normalized External Footprint**: Represents public digital presence via `ExternalFootprintProfile` and `ExternalFootprintItem`, categorizing footprint into official website, company profile, leadership profile, news publication, video reference, social reference, and public register. Rejections are routed to an inspectable audit log.
+
+## Stage 7 — Refresh & Change Intelligence
+
+The Stage 7 change detection and refresh engine (`norway_company_agent.change_intelligence`) tracks company evolution over time with fail-closed preservation:
+- **Stable Claim Keys**: Deterministic claim keys (`generate_stable_claim_key`) formatted as `org:{org}|field:{field}` or `org:{org}|field:{field}|entity:{qualifier}`. Keys are purely semantic: independent of crawl timestamps, random UUIDs, ordering, or volatile fetch IDs. Logically identical claims across different runs generate the exact same key.
+- **Immutable Snapshots**: Successful refreshes produce an immutable, versioned `CompanySnapshot`. Historical snapshots are frozen upon creation and cannot be mutated by later runs.
+- **Semantic Comparison & Material Change Detection**: Detects `ADDED`, `REMOVED`, `MODIFIED`, and `UNCHANGED` claims. Evaluates materiality purely on normalized semantic values (`is_material_change`), strictly preventing false changes caused by:
+  - Timestamp differences (`retrieved_at`, `effective_at`)
+  - Dictionary key ordering differences
+  - List ordering differences for set-like items
+  - Whitespace differences (collapsed multi-spaces)
+  - URL normalization variations (scheme, default ports, trailing slashes, tracking parameters)
+  - Case differences for case-insensitive fields (`legal_form`, `municipality`, `email`, `domain`)
+  - Floating point rounding noise
+- **Failed Refresh Preservation (Critical)**:
+  - When a refresh fails (network error, HTTP 500, timeout, or invalid payload), the previous known-good snapshot is **preserved intact**.
+  - Missing data caused by a failed fetch is never interpreted as deletion: **zero false removals**.
+  - In partial failures (e.g., registry succeeded but website timed out), claims from failed sources are carried forward from the previous snapshot, while claims from succeeded sources are updated.
+- **Idempotent Reruns**: Rerunning the refresh pipeline with identical input state produces identical snapshots and zero duplicate changes.
+- **Versioned Snapshot Store**: In-memory `MemorySnapshotStore` maintains chronological snapshot history per organisation number.
+
 ## Coverage limits
 
 - Public annual accounts do not exist for every registered entity. AS and ASA generally file; many sole
