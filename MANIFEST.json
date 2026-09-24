@@ -7,11 +7,11 @@
     "repository": "namandeeptripathi/OrgTrace"
   },
   "reproducibility": {
-    "git_commit": "6d9d8d3b1a9da16b4cf17b670c845ee6271d0bec",
+    "git_commit": "bab69b1b2e6ce3d2197c8c0f800bf9a89ca5536e",
     "git_branch": "main",
     "python_version": "3.14.7",
     "platform": "darwin",
-    "timestamp_utc": "2026-09-19T20:03:26Z"
+    "timestamp_utc": "2026-09-24T14:43:29Z"
   },
   "execution": {
     "entrypoint_command": "./scripts/run_competition.sh",
@@ -98,17 +98,17 @@
   "outputs": {
     "envelopes_jsonl": {
       "path": "out/envelopes.jsonl",
-      "sha256": "82f48920feb8e3954a6798a0fe6d7bab670665646c7d90f5d638923c89f7beab",
+      "sha256": "c81c74ce9c17841e663fc5ba51d9c133ca1bd39fa10da4edc0a267303e72c4b8",
       "count": 1000
     },
     "profiles_jsonl": {
       "path": "out/profiles.jsonl",
-      "sha256": "e3bd2d8bdbc71a2378585c7c9d26216711b6b9f1b20e8d6bef5d1ea95fec8ed5",
+      "sha256": "b0e6384571c6d1d70007c5b36baecb53c62c9a81a3a7940e5741ee8509604658",
       "count": 1000
     },
     "report_json": {
       "path": "out/run-report.json",
-      "sha256": "393e87e30c5148bb0229fac545a2ff8b8c57e0a13f070a207ce04956b022c487"
+      "sha256": "0ca0ae91c91f8e3c0db0b6b91755a4f126446e90f7d0fe94cae948c9b6d32634"
     }
   },
   "pinned_dependencies": {
