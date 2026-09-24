@@ -32,6 +32,16 @@ class Evidence:
     content_sha256: str | None = None
     source_row_key: str | None = None
     effective_at: str | None = None
+    # Stage 15 Hardening Provenance Fields
+    source_title: str | None = None
+    published_at: str | None = None
+    organisation_number: str | None = None
+    company_name: str | None = None
+    identity_match: bool | None = None
+    evidence_excerpt: str | None = None
+    confidence: float | None = None
+    validation_status: str | None = None
+    rejection_reason: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -50,6 +60,15 @@ def evidence(
     content_sha256: str | None = None,
     source_row_key: str | None = None,
     effective_at: str | None = None,
+    source_title: str | None = None,
+    published_at: str | None = None,
+    organisation_number: str | None = None,
+    company_name: str | None = None,
+    identity_match: bool | None = None,
+    evidence_excerpt: str | None = None,
+    confidence: float | None = None,
+    validation_status: str | None = None,
+    rejection_reason: str | None = None,
 ) -> dict[str, Any]:
     return Evidence(
         field=field,
@@ -64,4 +83,14 @@ def evidence(
         content_sha256=content_sha256,
         source_row_key=source_row_key,
         effective_at=effective_at,
+        source_title=source_title,
+        published_at=published_at,
+        organisation_number=organisation_number,
+        company_name=company_name,
+        identity_match=identity_match,
+        evidence_excerpt=evidence_excerpt,
+        confidence=confidence,
+        validation_status=validation_status,
+        rejection_reason=rejection_reason,
     ).to_dict()
+

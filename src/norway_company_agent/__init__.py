@@ -249,5 +249,31 @@ from .coverage import (
     normalize_url,
     resolve_field_conflict,
 )
+from .identity_hardening import (
+    ContradictionRecord,
+    DomainEntityValidation,
+    DomainValidationStatus,
+    EvidenceValidationStatus,
+    FactAcceptanceDecision,
+    FactAcceptanceVerdict,
+    FinancialValidationResult,
+    IdentityValidation,
+    NameComparisonResult,
+    NameMatchStatus,
+    OrgNumberComparison,
+    SourceAuthority,
+    SourceIdentity,
+    canonicalize_domain_hostname,
+    compare_company_names,
+    compare_org_numbers,
+    detect_and_resolve_contradiction,
+    evaluate_fact_acceptance,
+    log_identity_event,
+    robust_normalize_company_name,
+    validate_domain_entity,
+    validate_financial_fact,
+    validate_source_identity,
+)
+
 
 

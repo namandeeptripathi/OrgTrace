@@ -444,10 +444,11 @@ def extract_financials_from_pdf(
     else:
         text = str(pdf_bytes_or_text)
 
-    # EXACT-ENTITY IDENTITY SAFEGUARD:
-    # Document must contain the 9-digit organisation number to prevent parent/subsidiary confusion
-    clean_digits = re.sub(r"\D", "", text)
-    if canonical_org not in clean_digits:
+    # EXACT-ENTITY IDENTITY SAFEGUARD (STAGE 15 HARDENED):
+    # Document must contain the bounded 9-digit organisation number (optionally formatted
+    # with spaces or dots like '123 456 789' or '123.456.789') to prevent boundary-concatenation leakage.
+    org_bounded_pat = rf"(?<!\d){re.escape(canonical_org[:3])}[\s\.]?{re.escape(canonical_org[3:6])}[\s\.]?{re.escape(canonical_org[6:])}(?!\d)"
+    if not re.search(org_bounded_pat, text):
         return None
 
     currency = "NOK"
