@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
 from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
@@ -46,6 +47,8 @@ def main() -> None:
     parser.add_argument("--brave-api-key-env", default="BRAVE_SEARCH_API_KEY", help="Env var holding the Brave Search API key for discovery")
     parser.add_argument("--discovery-timeout", type=float, default=15.0)
     parser.add_argument("--discovery-count", type=int, default=10)
+    parser.add_argument("--previous-profiles", default=None, help="Optional previous profiles JSONL for change intelligence")
+    parser.add_argument("--changes-output", default=None, help="Optional change intelligence report output path")
     args = parser.parse_args()
 
     brave_api_key = os.environ.get(args.brave_api_key_env, "").strip()
@@ -156,6 +159,30 @@ def main() -> None:
 
     completed_at = utc_now()
     ordered_profiles = [state[org] for org in orgs]
+
+    # Stage 16: Freshness & Change Intelligence comparison
+    previous_profiles_by_org: dict[str, dict] = {}
+    if args.previous_profiles and Path(args.previous_profiles).exists():
+        for line in Path(args.previous_profiles).read_text(encoding="utf-8").splitlines():
+            line_str = line.strip()
+            if line_str:
+                p_data = json.loads(line_str)
+                p_org = p_data.get("organisation_number")
+                if p_org:
+                    previous_profiles_by_org[p_org] = p_data
+
+    change_reports = []
+    for profile in ordered_profiles:
+        p_org = profile["organisation_number"]
+        prev_p = previous_profiles_by_org.get(p_org)
+        ch_report = analyze_profile_changes(prev_p, profile, timestamp=completed_at)
+        change_reports.append(ch_report.to_dict())
+        profile["change_intelligence"] = ch_report.to_dict()
+
+    if args.changes_output:
+        Path(args.changes_output).parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(Path(args.changes_output), change_reports)
+
     envelopes = [
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
@@ -178,6 +205,11 @@ def main() -> None:
         "registry": registry_metadata,
         "operations": operations,
         "validation": validation,
+        "change_intelligence": {
+            "total_evaluated": len(change_reports),
+            "with_material_changes": sum(1 for cr in change_reports if cr.get("material_changes", 0) > 0),
+            "initial_observations": sum(1 for cr in change_reports if cr.get("status") == "INITIAL_OBSERVATION"),
+        },
     }
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
