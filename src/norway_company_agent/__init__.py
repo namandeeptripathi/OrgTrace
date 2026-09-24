@@ -293,6 +293,20 @@ from .identity_hardening import (
     validate_financial_fact,
     validate_source_identity,
 )
+from .explanations import (
+    CompanyExplanationReport,
+    EvidenceTier,
+    Explanation,
+    ExplanationConfidence,
+    ExplanationContext,
+    ExplanationEvidenceRef,
+    classify_evidence_tier,
+    explain_company_profile,
+    format_explanation_cli,
+    generate_deterministic_explanation,
+    generate_explanation,
+    validate_explanation,
+)
 
 
 

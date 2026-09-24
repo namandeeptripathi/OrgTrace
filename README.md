@@ -290,6 +290,19 @@ Open `out/refresh-demo.json` to inspect the detected material changes and eviden
 
 ---
 
+## 13.5 Evidence-Grounded Explanations
+
+OrgTrace provides a lightweight, zero-hallucination explanation layer designed for the Signalpost **10-point explanation/usability** component.
+
+- **Evidence First, Explanation Second**: Generates explanations exclusively from retrieved, verified facts and statutory evidence; never invents missing information.
+- **4-Tier Source Hierarchy**: Prioritizes statutory registers (BRREG Tier 1) and official websites over secondary or weak aggregators.
+- **Structured Rationale**: Explains *what* was found, *why* the conclusion was reached, *which* evidence supports it, and *what* remains uncertain.
+- **Deterministic Validation & Fallbacks**: Strict hallucination validator screens evidence IDs, source names, substantive numbers, dates, and entity identifiers. Replaces any ungrounded candidate with a safe deterministic fallback.
+
+See [`docs/explanations.md`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/docs/explanations.md) for full architecture and schema examples.
+
+---
+
 ## 14. Evaluation Methodology
 
 OrgTrace uses a dual evaluation strategy:

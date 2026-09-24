@@ -16,6 +16,7 @@ from norway_company_agent.batch import profile_complete_for_modules, profiles_fr
 from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
 from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
+from norway_company_agent.explanations import explain_company_profile  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
@@ -49,6 +50,7 @@ def main() -> None:
     parser.add_argument("--discovery-count", type=int, default=10)
     parser.add_argument("--previous-profiles", default=None, help="Optional previous profiles JSONL for change intelligence")
     parser.add_argument("--changes-output", default=None, help="Optional change intelligence report output path")
+    parser.add_argument("--explanations-output", default=None, help="Optional explanations report output path")
     args = parser.parse_args()
 
     brave_api_key = os.environ.get(args.brave_api_key_env, "").strip()
@@ -183,6 +185,17 @@ def main() -> None:
         Path(args.changes_output).parent.mkdir(parents=True, exist_ok=True)
         write_jsonl(Path(args.changes_output), change_reports)
 
+    # Stage 17: Evidence-Grounded Explanations
+    explanation_reports = []
+    for profile in ordered_profiles:
+        exp_report = explain_company_profile(profile)
+        explanation_reports.append(exp_report.to_dict())
+        profile["explanations"] = exp_report.to_dict()
+
+    if args.explanations_output:
+        Path(args.explanations_output).parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(Path(args.explanations_output), explanation_reports)
+
     envelopes = [
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
@@ -209,6 +222,15 @@ def main() -> None:
             "total_evaluated": len(change_reports),
             "with_material_changes": sum(1 for cr in change_reports if cr.get("material_changes", 0) > 0),
             "initial_observations": sum(1 for cr in change_reports if cr.get("status") == "INITIAL_OBSERVATION"),
+        },
+        "explanations": {
+            "total_evaluated": len(explanation_reports),
+            "avg_grounded_rate": round(
+                sum(er["metrics"]["grounded_rate"] for er in explanation_reports) / len(explanation_reports), 3
+            ) if explanation_reports else 1.0,
+            "avg_evidence_coverage": round(
+                sum(er["metrics"]["evidence_coverage"] for er in explanation_reports) / len(explanation_reports), 3
+            ) if explanation_reports else 1.0,
         },
     }
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
