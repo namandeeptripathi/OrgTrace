@@ -243,12 +243,19 @@ def _extraction_state(text: str, soup: BeautifulSoup) -> str:
     return "js_fallback_candidate" if len(text.strip()) < 100 and len(soup.select("script[src]")) >= 2 else "static_complete"
 
 
-def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_000_000) -> tuple[dict[str, Any], dict[str, Any]]:
+def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_000_000, guard: Any = None) -> tuple[dict[str, Any], dict[str, Any]]:
     supplied_url = str(url or "").strip()
     supplied_scheme = bool(re.match(r"^https?://", supplied_url, re.I))
     normalized = normalize_homepage(url)
     if not normalized:
         return evidence("website", "not_found", "registry_linked_company_website", "https://data.brreg.no/enhetsregisteret/api/enheter", note="No valid registry website URL"), {"requests": 0, "bytes": 0, "latencies_ms": []}
+
+    # 1. Budget Guard Check
+    if guard is not None:
+        allowed, reason = guard.acquire_request()
+        if not allowed:
+            return evidence("website", "not_attempted", "registry_linked_company_website", normalized, note=f"Execution budget exhausted: {reason}"), {"requests": 0, "bytes": 0, "latencies_ms": []}
+
     try:
         assert_public_url(normalized)
     except ValueError as exc:
@@ -265,7 +272,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             if len(raw) > max_bytes:
                 return evidence("website", "blocked", "registry_linked_company_website", normalized, note="Homepage exceeds byte limit"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
             if "html" not in content_type.lower():
-                return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"Unsupported content type: {content_type}"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
+                return evidence("website", "unavailable", "registry_linked_company_website", normalized, note=f"Unsupported content type: {content_type}"), {"requests": 2, "bytes": len(raw), "latencies_ms": [elapsed]}
             final_url = response.geturl()
             assert_public_url(final_url)
         html = raw.decode("utf-8", errors="replace")
@@ -294,39 +301,60 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         bytes_received = len(raw)
         page_latencies = [elapsed]
         homepage_domain = value["registered_domain"]
-        for page_url in _priority_links(final_url, soup):
-            page, page_social, page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
-                page_url,
-                homepage_domain=homepage_domain,
-                timeout=timeout,
-                max_bytes=min(max_bytes, 1_000_000),
-            )
-            requests += page_requests
-            bytes_received += page_bytes
-            if page_elapsed:
-                page_latencies.append(page_elapsed)
-            if page:
-                pages.append(page)
-                social.extend(page_social)
-            elif page_error:
-                crawl_errors.append({"url": page_url, "error": page_error})
+
+        # Only crawl secondary pages if NOT in reduced-enrichment mode
+        if not (guard is not None and guard.is_reduced_mode()):
+            for page_url in _priority_links(final_url, soup):
+                if guard is not None:
+                    allowed, _ = guard.acquire_request()
+                    if not allowed:
+                        break
+                page, page_social, page_requests, page_bytes, page_elapsed, page_error = _fetch_secondary_page(
+                    page_url,
+                    homepage_domain=homepage_domain,
+                    timeout=timeout,
+                    max_bytes=min(max_bytes, 1_000_000),
+                )
+                requests += page_requests
+                bytes_received += page_bytes
+                if page_elapsed:
+                    page_latencies.append(page_elapsed)
+                if page:
+                    pages.append(page)
+                    social.extend(page_social)
+                elif page_error:
+                    crawl_errors.append({"url": page_url, "error": page_error})
+
         value["pages"] = pages
         value["social_links"] = list({(item["platform"], item["url"]): item for item in social}.values())
         value["crawl_errors"] = crawl_errors
+        if guard is not None:
+            guard.record_request_result(domain=homepage_domain, status_code=200)
         return evidence("website", "available", "registry_linked_company_website", final_url, value=value, note="Company-controlled claim layer; not an official registry fact", content_sha256=value["content_sha256"]), {"requests": requests, "bytes": bytes_received, "latencies_ms": page_latencies}
     except urllib.error.HTTPError as exc:
         elapsed = int((time.monotonic() - started) * 1000)
-        status = "not_found" if exc.code in {404, 410} else "source_error"
+        status = "not_found" if exc.code in {404, 410} else "rate_limited" if exc.code == 429 else "unavailable"
+        if guard is not None:
+            guard.record_request_result(domain=_registered_domain(normalized) or "unknown", status_code=exc.code)
         return evidence("website", status, "registry_linked_company_website", normalized, note=f"HTTP {exc.code}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
     except urllib.error.URLError as exc:
-        if not supplied_scheme and normalized.startswith("https://"):
+        reason_str = str(getattr(exc, "reason", ""))
+        is_timeout = "timeout" in reason_str.lower() or "timed out" in reason_str.lower()
+        if not supplied_scheme and normalized.startswith("https://") and not is_timeout:
             first_elapsed = int((time.monotonic() - started) * 1000)
-            record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes)
+            record, metrics = fetch_website("http://" + supplied_url, timeout=timeout, max_bytes=max_bytes, guard=guard)
             metrics["requests"] += 2
             metrics["latencies_ms"].insert(0, first_elapsed)
             return record, metrics
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"URLError: {str(exc.reason)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        status = "timeout" if is_timeout else "unavailable"
+        if guard is not None:
+            guard.record_request_result(domain=_registered_domain(normalized) or "unknown", status_code=0)
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"URLError: {reason_str[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
     except Exception as exc:
         elapsed = int((time.monotonic() - started) * 1000)
-        return evidence("website", "source_error", "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}
+        is_timeout = "timeout" in type(exc).__name__.lower() or "timed out" in str(exc).lower()
+        status = "timeout" if is_timeout else "unavailable"
+        if guard is not None:
+            guard.record_request_result(domain=_registered_domain(normalized) or "unknown", status_code=0)
+        return evidence("website", status, "registry_linked_company_website", normalized, note=f"{type(exc).__name__}: {str(exc)[:180]}"), {"requests": 2, "bytes": 0, "latencies_ms": [elapsed]}

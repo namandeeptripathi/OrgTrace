@@ -17,8 +17,10 @@ from norway_company_agent.change_intelligence import analyze_profile_changes  # 
 from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.explanations import explain_company_profile  # noqa: E402
+from norway_company_agent.http import fetch_json  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
+from norway_company_agent.resilience import CompetitionExecutionGuard, FailureCategory, classify_failure  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
 
@@ -35,7 +37,7 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
     parser.add_argument("--organisations", required=True, help="JSON, JSONL, or text organisation-number list")
-    parser.add_argument("--bulk", required=True, help="Frozen Brreg entity snapshot")
+    parser.add_argument("--bulk", default=None, help="Frozen Brreg entity snapshot (optional)")
     parser.add_argument("--output", required=True, help="Terminal envelope JSONL")
     parser.add_argument("--profiles-output", required=True)
     parser.add_argument("--report", required=True)
@@ -45,6 +47,10 @@ def main() -> None:
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
+    parser.add_argument("--max-requests", type=int, default=2000, help="Maximum external requests per execution")
+    parser.add_argument("--max-cost", type=float, default=10.0, help="Maximum external API cost in USD")
+    parser.add_argument("--max-runtime", type=float, default=2700.0, help="Maximum execution runtime in seconds (45 min = 2700s)")
+    parser.add_argument("--reduced-mode-threshold", type=float, default=2400.0, help="Runtime in seconds to trigger reduced mode (40 min = 2400s)")
     parser.add_argument("--brave-api-key-env", default="BRAVE_SEARCH_API_KEY", help="Env var holding the Brave Search API key for discovery")
     parser.add_argument("--discovery-timeout", type=float, default=15.0)
     parser.add_argument("--discovery-count", type=int, default=10)
@@ -56,6 +62,13 @@ def main() -> None:
     brave_api_key = os.environ.get(args.brave_api_key_env, "").strip()
 
     started_at = utc_now()
+    guard = CompetitionExecutionGuard(
+        max_requests=args.max_requests,
+        max_cost=args.max_cost,
+        max_runtime_seconds=args.max_runtime,
+        reduced_mode_threshold_seconds=args.reduced_mode_threshold,
+    )
+
     organisation_inputs = read_organisation_inputs(args.organisations)
     orgs = [item["organisation_number"] for item in organisation_inputs]
     if len(orgs) != args.expected_count:
@@ -71,67 +84,88 @@ def main() -> None:
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
 
     def enrich(profile: dict) -> tuple[dict, dict]:
-        records, metrics = fetch_official_modules(profile["organisation_number"], fetch_modules)
-        profile["evidence"].update(records)
-        website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
-        if "website" in requested_modules:
-            if profile.get("website"):
-                # Registry website exists — use the existing direct-fetch path.
-                website_record, website_metrics = fetch_website(profile.get("website"))
-                profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
-            elif brave_api_key:
-                # No registry website — attempt discovery fallback.
-                search_results, search_op = brave_search(
-                    profile, brave_api_key,
-                    timeout=args.discovery_timeout, count=args.discovery_count,
-                )
-                # Count the Brave API request in the budget tracker.
-                website_metrics["requests"] += 1
-                website_metrics["bytes"] += search_op.get("bytes", 0)
-                if search_op.get("latency_ms"):
-                    website_metrics["latencies_ms"].append(search_op["latency_ms"])
-                decision = choose_search_candidate(profile, search_results)
-                selected = decision.get("selected")
-                if selected:
-                    website_record, crawl_metrics = fetch_website(selected["url"])
-                    website_metrics["requests"] += crawl_metrics["requests"]
-                    website_metrics["bytes"] += crawl_metrics["bytes"]
-                    website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
-                    gated = apply_website_identity_gate(profile, website_record)
-                    website = gated["website"]
-                    assessment = gated.get("assessment")
-                    website["source_type"] = "search_discovered_company_website"
-                    if assessment and assessment.get("publishable") and website.get("status") == "available":
-                        profile["evidence"]["website"] = website
+        try:
+            records, metrics = fetch_official_modules(
+                profile["organisation_number"],
+                fetch_modules,
+                fetcher=lambda u: fetch_json(u, guard=guard),
+            )
+            profile.setdefault("evidence", {}).update(records)
+            website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
+            if "website" in requested_modules:
+                if profile.get("website"):
+                    # Registry website exists — use the existing direct-fetch path.
+                    website_record, website_metrics = fetch_website(profile.get("website"), guard=guard)
+                    profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+                elif brave_api_key and not guard.is_reduced_mode():
+                    # No registry website — attempt discovery fallback if budget permits.
+                    allowed, reason = guard.acquire_request(cost=0.005)
+                    if allowed:
+                        search_results, search_op = brave_search(
+                            profile, brave_api_key,
+                            timeout=args.discovery_timeout, count=args.discovery_count,
+                        )
+                        website_metrics["requests"] += 1
+                        website_metrics["bytes"] += search_op.get("bytes", 0)
+                        if search_op.get("latency_ms"):
+                            website_metrics["latencies_ms"].append(search_op["latency_ms"])
+                        decision = choose_search_candidate(profile, search_results)
+                        selected = decision.get("selected")
+                        if selected:
+                            website_record, crawl_metrics = fetch_website(selected["url"], guard=guard)
+                            website_metrics["requests"] += crawl_metrics["requests"]
+                            website_metrics["bytes"] += crawl_metrics["bytes"]
+                            website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
+                            gated = apply_website_identity_gate(profile, website_record)
+                            website = gated["website"]
+                            assessment = gated.get("assessment")
+                            website["source_type"] = "search_discovered_company_website"
+                            if assessment and assessment.get("publishable") and website.get("status") == "available":
+                                profile["evidence"]["website"] = website
+                            else:
+                                profile["evidence"]["website"] = evidence(
+                                    "website", "not_found",
+                                    "search_discovered_company_website", selected["url"],
+                                    note="Search candidate crawled but exact-entity identity not verified",
+                                )
+                        else:
+                            profile["evidence"]["website"] = evidence(
+                                "website", "not_found",
+                                "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                                note="No search result passed the deterministic crawl-candidate gate",
+                            )
                     else:
-                        # Identity not confirmed — record not_found, never publish unverified content.
                         profile["evidence"]["website"] = evidence(
-                            "website", "not_found",
-                            "search_discovered_company_website", selected["url"],
-                            note="Search candidate crawled but exact-entity identity not verified",
+                            "website", "not_attempted",
+                            "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                            note=f"Search discovery skipped: {reason}",
                         )
                 else:
-                    # No candidate survived scoring.
+                    note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
                     profile["evidence"]["website"] = evidence(
                         "website", "not_found",
-                        "search_discovery", "https://api.search.brave.com/res/v1/web/search",
-                        note="No search result passed the deterministic crawl-candidate gate",
+                        "registry_linked_company_website",
+                        "https://data.brreg.no/enhetsregisteret/api/enheter",
+                        note=note,
                     )
-            else:
-                # No registry website and no API key available.
-                profile["evidence"]["website"] = evidence(
-                    "website", "not_found",
-                    "registry_linked_company_website",
-                    "https://data.brreg.no/enhetsregisteret/api/enheter",
-                    note="No valid registry website URL",
-                )
-        metric = {
-            "requests": len(metrics) + website_metrics["requests"],
-            "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
-            "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
-        }
-        profile["run_metrics"] = metric
-        return profile, metric
+            metric = {
+                "requests": len(metrics) + website_metrics["requests"],
+                "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
+                "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
+            }
+            profile["run_metrics"] = metric
+            return profile, metric
+        except Exception as exc:
+            fail_cat = classify_failure(exc)
+            profile.setdefault("errors", []).append({
+                "error": str(exc),
+                "category": fail_cat.value,
+                "type": type(exc).__name__,
+            })
+            metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
+            profile["run_metrics"] = {**metric, "status": "failed", "error": str(exc), "category": fail_cat.value}
+            guard.record_request_result(domain="unknown", status_code=0, failure_category=fail_cat)
+            return profile, metric
 
     state: dict[str, dict] = {}
     resumed_profiles = 0
@@ -147,14 +181,37 @@ def main() -> None:
         }
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
+
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
         for index, future in enumerate(as_completed(futures), 1):
-            profile, metric = future.result()
+            target_org = futures[future]
+            try:
+                profile, metric = future.result()
+            except Exception as exc:
+                fail_cat = classify_failure(exc)
+                profile = next((p for p in pending_profiles if p["organisation_number"] == target_org), {
+                    "organisation_number": target_org,
+                    "name": "",
+                    "legal_form": "",
+                    "evidence": {},
+                })
+                profile.setdefault("errors", []).append({
+                    "error": str(exc),
+                    "category": fail_cat.value,
+                })
+                profile["run_metrics"] = {"requests": 0, "bytes": 0, "latencies_ms": [], "status": "failed", "error": str(exc)}
+                metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
+
             state[profile["organisation_number"]] = profile
             operations["requests"] += metric["requests"]
             operations["bytes"] += metric["bytes"]
             operations["latencies_ms"].extend(metric["latencies_ms"])
+
+            # Check reduced-mode transition
+            if guard.should_log_reduced_mode_entry():
+                print("\n" + guard.format_execution_budget() + "\n\nEntering reduced-enrichment mode.\n")
+
             if index % args.checkpoint_every == 0 or index == len(pending_profiles):
                 checkpoint = [state[org] for org in orgs if org in state]
                 write_jsonl(profiles_output, checkpoint)
@@ -177,9 +234,12 @@ def main() -> None:
     for profile in ordered_profiles:
         p_org = profile["organisation_number"]
         prev_p = previous_profiles_by_org.get(p_org)
-        ch_report = analyze_profile_changes(prev_p, profile, timestamp=completed_at)
-        change_reports.append(ch_report.to_dict())
-        profile["change_intelligence"] = ch_report.to_dict()
+        try:
+            ch_report = analyze_profile_changes(prev_p, profile, timestamp=completed_at)
+            change_reports.append(ch_report.to_dict())
+            profile["change_intelligence"] = ch_report.to_dict()
+        except Exception as exc:
+            profile["change_intelligence"] = {"status": "INITIAL_OBSERVATION", "material_changes": 0, "error": str(exc)}
 
     if args.changes_output:
         Path(args.changes_output).parent.mkdir(parents=True, exist_ok=True)
@@ -188,9 +248,12 @@ def main() -> None:
     # Stage 17: Evidence-Grounded Explanations
     explanation_reports = []
     for profile in ordered_profiles:
-        exp_report = explain_company_profile(profile)
-        explanation_reports.append(exp_report.to_dict())
-        profile["explanations"] = exp_report.to_dict()
+        try:
+            exp_report = explain_company_profile(profile)
+            explanation_reports.append(exp_report.to_dict())
+            profile["explanations"] = exp_report.to_dict()
+        except Exception as exc:
+            profile["explanations"] = {"summary": "Explanation generation failed", "error": str(exc), "metrics": {"grounded_rate": 1.0, "evidence_coverage": 0.0}}
 
     if args.explanations_output:
         Path(args.explanations_output).parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +269,23 @@ def main() -> None:
     latencies = sorted(operations.pop("latencies_ms"))
     operations["p50_ms"] = latencies[len(latencies) // 2] if latencies else None
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
+
+    # Calculate batch completion outcomes
+    successful_count = 0
+    partial_count = 0
+    failed_count = 0
+    for profile in ordered_profiles:
+        evidence_dict = profile.get("evidence", {})
+        statuses = [rec.get("status") for rec in evidence_dict.values() if isinstance(rec, dict)]
+        if profile.get("run_metrics", {}).get("status") == "failed" or not statuses:
+            failed_count += 1
+        elif all(s == "available" for s in statuses):
+            successful_count += 1
+        elif any(s == "available" for s in statuses):
+            partial_count += 1
+        else:
+            failed_count += 1
+
     report = {
         "run_id": args.run_id,
         "started_at": started_at,
@@ -218,6 +298,13 @@ def main() -> None:
         "registry": registry_metadata,
         "operations": operations,
         "validation": validation,
+        "batch_summary": {
+            "attempted": len(orgs),
+            "successful": successful_count,
+            "partial": partial_count,
+            "failed": failed_count,
+        },
+        "execution_guard": guard.to_dict(),
         "change_intelligence": {
             "total_evaluated": len(change_reports),
             "with_material_changes": sum(1 for cr in change_reports if cr.get("material_changes", 0) > 0),
@@ -235,7 +322,18 @@ def main() -> None:
     }
     Path(args.report).parent.mkdir(parents=True, exist_ok=True)
     Path(args.report).write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print(json.dumps(report, ensure_ascii=False, indent=2))
+
+    # Output formatted competition cards
+    print("\n" + "=" * 60)
+    print(guard.format_batch_summary(len(orgs), successful_count, partial_count, failed_count))
+    print("-" * 60)
+    print(guard.format_request_budget())
+    print("-" * 60)
+    print(guard.format_cost_budget())
+    print("-" * 60)
+    print(guard.format_execution_budget())
+    print("=" * 60 + "\n")
+
     raise SystemExit(0 if validation["passed"] else 1)
 
 

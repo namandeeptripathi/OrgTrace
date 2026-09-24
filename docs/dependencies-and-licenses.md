@@ -6,7 +6,7 @@ This document inventories all external dependencies, libraries, APIs, machine le
 
 ## A. Python Package Dependencies
 
-All runtime dependencies are pinned in [`requirements.txt`](file:///Users/apple/Downloads/signalpost-starter-kit/requirements.txt) with exact versions, and specified with semver ranges in [`pyproject.toml`](file:///Users/apple/Downloads/signalpost-starter-kit/pyproject.toml).
+All runtime dependencies are pinned in [`requirements.txt`](requirements.txt) with exact versions, and specified with semver ranges in [`pyproject.toml`](pyproject.toml).
 
 ### Core Runtime Packages
 

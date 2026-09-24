@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .evidence import evidence, utc_now
-from .official import accounting_obligation_assessment
+from .http import fetch_json
+from .official import BRREG_ENTITY, accounting_obligation_assessment, normalize_entity
 from .sampling import iter_bulk
 
 
@@ -19,6 +20,11 @@ TERMINAL_STATES = {
     "source_error",
     "budget_exhausted",
     "submission_error",
+    "timeout",
+    "rate_limited",
+    "parse_failed",
+    "not_attempted",
+    "unavailable",
 }
 
 
@@ -56,18 +62,88 @@ def read_organisation_numbers(path: str | Path) -> list[str]:
 
 
 def profiles_from_bulk(
-    path: str | Path,
+    path: str | Path | None,
     organisation_numbers: Iterable[str],
     *,
     allow_missing: bool = True,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     requested = list(organisation_numbers)
     wanted = set(requested)
-    snapshot_sha256 = hashlib.sha256(Path(path).read_bytes()).hexdigest()
     retrieved_at = utc_now()
+
+    # Fallback to live API if bulk file is missing or not provided
+    bulk_path = Path(path) if path else None
+    if not bulk_path or not bulk_path.exists():
+        snapshot_sha256 = "live_registry_api"
+        found: dict[str, dict[str, Any]] = {}
+        for org in requested:
+            res = fetch_json(BRREG_ENTITY.format(org=org), timeout=15.0)
+            if res.status == 200 and isinstance(res.body, dict):
+                entity = normalize_entity(res.body)
+                found[org] = {
+                    "organisation_number": org,
+                    "name": entity.get("name") or "",
+                    "legal_form": entity.get("legal_form") or "",
+                    "employees": entity.get("employees"),
+                    "bankrupt": entity.get("bankrupt") or False,
+                    "liquidating": entity.get("liquidating") or False,
+                    "municipality": (entity.get("business_address") or {}).get("kommune"),
+                    "municipality_number": (entity.get("business_address") or {}).get("kommunenummer"),
+                    "industry_code": (entity.get("industry") or {}).get("kode"),
+                    "industry_label": (entity.get("industry") or {}).get("beskrivelse"),
+                    "website": entity.get("website") or "",
+                    "latest_submitted_accounts": entity.get("latest_submitted_accounts"),
+                    "evidence": {
+                        "registry": evidence(
+                            "registry",
+                            "available",
+                            "official_registry_live",
+                            BRREG_ENTITY.format(org=org),
+                            value=res.body,
+                            retrieved_at=retrieved_at,
+                            content_sha256=res.content_sha256,
+                            source_row_key=org,
+                        ),
+                        "accounting_obligation": accounting_obligation_assessment(entity),
+                    },
+                }
+            else:
+                found[org] = {
+                    "organisation_number": org,
+                    "name": "",
+                    "legal_form": "",
+                    "evidence": {
+                        "registry": evidence(
+                            "registry",
+                            "not_found" if res.status in {404, 410} else "unavailable",
+                            "official_registry_live",
+                            BRREG_ENTITY.format(org=org),
+                            note=res.error or "Live entity lookup failed",
+                            retrieved_at=retrieved_at,
+                            source_row_key=org,
+                        ),
+                        "accounting_obligation": evidence(
+                            "accounting_obligation",
+                            "not_applicable",
+                            "official_registry_live",
+                            BRREG_ENTITY.format(org=org),
+                            note="No registry profile available to determine accounting obligation",
+                            retrieved_at=retrieved_at,
+                        ),
+                    },
+                }
+        return [found[org] for org in requested], {
+            "registry_snapshot_sha256": snapshot_sha256,
+            "registry_rows_scanned": 0,
+            "requested": len(requested),
+            "selected": sum(1 for p in found.values() if p.get("name")),
+            "missing": sum(1 for p in found.values() if not p.get("name")),
+        }
+
+    snapshot_sha256 = hashlib.sha256(bulk_path.read_bytes()).hexdigest()
     found: dict[str, dict[str, Any]] = {}
     scanned = 0
-    for profile in iter_bulk(path):
+    for profile in iter_bulk(bulk_path):
         scanned += 1
         org = profile["organisation_number"]
         if org not in wanted:
@@ -140,8 +216,18 @@ def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     if status == "blocked":
         note = str(record.get("note") or "").casefold()
         return "blocked_robots" if "robot" in note else "blocked_policy"
+    if status == "timeout":
+        return "timeout"
+    if status == "rate_limited":
+        return "rate_limited"
+    if status == "parse_failed":
+        return "parse_failed"
+    if status in {"not_attempted", "budget_exhausted"}:
+        return "not_attempted"
     if status == "source_error":
         return "source_error"
+    if status == "unavailable":
+        return "unavailable"
     return "submission_error"
 
 

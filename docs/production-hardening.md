@@ -33,18 +33,18 @@ pip install -r requirements-dev.txt
 ```
 
 ### Dependency Management & Updates:
-- **Production Lock**: [`requirements.txt`](file:///Users/apple/Downloads/signalpost-starter-kit/requirements.txt) contains exact pinned versions for deterministic deployments.
-- **Specification**: [`pyproject.toml`](file:///Users/apple/Downloads/signalpost-starter-kit/pyproject.toml) specifies bounded semver constraints (`beautifulsoup4>=4.14,<5`, `extruct>=0.18,<1`, `lxml>=6,<7`, `pydantic>=2.12,<3`, `pypdf>=6,<7`, `tldextract>=5.3,<6`, `trafilatura>=2.0,<3`).
-- **Lockfile**: [`uv.lock`](file:///Users/apple/Downloads/signalpost-starter-kit/uv.lock) provides cryptographic hash verification when using `uv`.
+- **Production Lock**: [`requirements.txt`](requirements.txt) contains exact pinned versions for deterministic deployments.
+- **Specification**: [`pyproject.toml`](pyproject.toml) specifies bounded semver constraints (`beautifulsoup4>=4.14,<5`, `extruct>=0.18,<1`, `lxml>=6,<7`, `pydantic>=2.12,<3`, `pypdf>=6,<7`, `tldextract>=5.3,<6`, `trafilatura>=2.0,<3`).
+- **Lockfile**: [`uv.lock`](uv.lock) provides cryptographic hash verification when using `uv`.
 
 ---
 
 ## 3. Configuration & Secret Management
 
-OrgTrace centralizes configuration in [`norway_company_agent.config`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/config.py), loading settings from environment variables or `.env` files.
+OrgTrace centralizes configuration in [`norway_company_agent.config`](src/norway_company_agent/config.py), loading settings from environment variables or `.env` files.
 
 ### Template:
-A template is provided in [`.env.example`](file:///Users/apple/Downloads/signalpost-starter-kit/.env.example). Copy to `.env` for local deployment:
+A template is provided in [`.env.example`](.env.example). Copy to `.env` for local deployment:
 ```bash
 cp .env.example .env
 ```
@@ -82,7 +82,7 @@ cp .env.example .env
 
 ## 4. URL Safety & SSRF Defenses
 
-Centralized in [`norway_company_agent.url_safety`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/url_safety.py):
+Centralized in [`norway_company_agent.url_safety`](src/norway_company_agent/url_safety.py):
 
 ### Defense Layers:
 1. **Scheme Validation**: Strictly allows `http` and `https`. Dangerous schemes (`file://`, `javascript:`, `data:`, `vbscript:`, `ftp:`, `gopher:`) raise `DangerousSchemeError`.
@@ -100,7 +100,7 @@ Centralized in [`norway_company_agent.url_safety`](file:///Users/apple/Downloads
 
 ## 5. Network Resilience & Failure Recovery
 
-Centralized in [`norway_company_agent.resilience`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/resilience.py) and [`norway_company_agent.http`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/http.py):
+Centralized in [`norway_company_agent.resilience`](src/norway_company_agent/resilience.py) and [`norway_company_agent.http`](src/norway_company_agent/http.py):
 
 ### Retry Policy & Error Classification:
 - **Retryable Status Codes**: `429` (Rate Limited), `500` (Internal Server Error), `502` (Bad Gateway), `503` (Service Unavailable), `504` (Gateway Timeout).
@@ -115,7 +115,7 @@ Centralized in [`norway_company_agent.resilience`](file:///Users/apple/Downloads
 
 ## 6. Source Licensing & Attribution
 
-Centralized in [`norway_company_agent.licensing`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/licensing.py):
+Centralized in [`norway_company_agent.licensing`](src/norway_company_agent/licensing.py):
 
 | Source / Domain | License Type | License Name | Attribution Required | Attribution Statement |
 | :--- | :--- | :--- | :--- | :--- |
@@ -131,14 +131,14 @@ Centralized in [`norway_company_agent.licensing`](file:///Users/apple/Downloads/
 
 ## 7. Logging & Observability
 
-### Structured Logging ([`logging_utils.py`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/logging_utils.py)):
+### Structured Logging ([`logging_utils.py`](src/norway_company_agent/logging_utils.py)):
 - Standard Python `logging` with `norway_company_agent` root logger.
 - `SecretRedactionFilter` automatically attached to all handlers.
 - Format options:
   - Standard human-readable: `2026-09-20T01:00:00Z [INFO] norway_company_agent: ...`
   - Structured JSON (`ORGTRACE_LOG_JSON=true`): `{"timestamp": "...", "level": "INFO", "engine": "...", "operation": "...", "duration_ms": 45.2, ...}`
 
-### Lightweight Observability ([`observability.py`](file:///Users/apple/Downloads/signalpost-starter-kit/src/norway_company_agent/observability.py)):
+### Lightweight Observability ([`observability.py`](src/norway_company_agent/observability.py)):
 - `ProductionMetricsCollector` provides in-memory telemetry without external infrastructure overhead:
   - Operation counts and durations per engine
   - Success and failure counts with exact success rate
@@ -164,10 +164,10 @@ To run the complete production validation suite:
 
 ```bash
 # Run full unit test suite (254 tests)
-PYTHONPATH=src /Users/apple/Downloads/signalpost-starter-kit/.venv/bin/python -m unittest tests.test_poc -v
+PYTHONPATH=src python3 -m unittest tests.test_poc -v
 
 # Run Stage 10 Evaluation Harness benchmark
-PYTHONPATH=src /Users/apple/Downloads/signalpost-starter-kit/.venv/bin/python -c "
+PYTHONPATH=src python3 -c "
 from norway_company_agent.evaluation import EvaluationHarness
 report = EvaluationHarness().run()
 print(report.to_markdown())

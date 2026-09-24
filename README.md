@@ -55,7 +55,7 @@ OrgTrace is organized into decoupled, deterministic pipeline stages:
                               Emit out/envelopes.jsonl, out/profiles.jsonl, out/run-report.json
 ```
 
-For full architectural details and Mermaid diagrams, see [`docs/architecture.md`](file:///Users/apple/Downloads/signalpost-starter-kit/docs/architecture.md).
+For full architectural details and Mermaid diagrams, see [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -169,7 +169,7 @@ pip install -r requirements.txt
 
 ## 9. Environment Configuration
 
-OrgTrace provides a template in [`.env.example`](file:///Users/apple/Downloads/signalpost-starter-kit/.env.example). Copy to `.env` if custom configuration is needed:
+OrgTrace provides a template in [`.env.example`](.env.example). Copy to `.env` if custom configuration is needed:
 
 ```bash
 cp .env.example .env
@@ -186,7 +186,7 @@ Key environment variables:
 
 ## 10. One-Command Execution
 
-OrgTrace provides a single, unified execution script [`scripts/run_competition.sh`](file:///Users/apple/Downloads/signalpost-starter-kit/scripts/run_competition.sh) (executable):
+OrgTrace provides a single, unified execution script [`scripts/run_competition.sh`](scripts/run_competition.sh) (executable):
 
 ### Run Full 1,000-Company Batch (Default):
 ```bash
@@ -235,7 +235,7 @@ Plain text inputs contain one 9-digit organisation number per line:
 
 ## 12. Output Format
 
-OrgTrace strictly adheres to the [`OUTPUT_CONTRACT.md`](file:///Users/apple/Downloads/signalpost-starter-kit/OUTPUT_CONTRACT.md) specification, emitting exactly one terminal envelope JSON object per input:
+OrgTrace strictly adheres to the [`OUTPUT_CONTRACT.md`](OUTPUT_CONTRACT.md) specification, emitting exactly one terminal envelope JSON object per input:
 
 ```json
 {
@@ -299,7 +299,7 @@ OrgTrace provides a lightweight, zero-hallucination explanation layer designed f
 - **Structured Rationale**: Explains *what* was found, *why* the conclusion was reached, *which* evidence supports it, and *what* remains uncertain.
 - **Deterministic Validation & Fallbacks**: Strict hallucination validator screens evidence IDs, source names, substantive numbers, dates, and entity identifiers. Replaces any ungrounded candidate with a safe deterministic fallback.
 
-See [`docs/explanations.md`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/docs/explanations.md) for full architecture and schema examples.
+See [`docs/explanations.md`](docs/explanations.md) for full architecture and schema examples.
 
 ---
 
@@ -344,7 +344,7 @@ OrgTrace uses a dual evaluation strategy:
 - **OrgTrace Code**: MIT License.
 - **Norwegian Government Data**: Norsk lisens for offentlige data (NLOD 2.0).
   - *Attribution*: "Inneholder data under Norsk lisens for offentlige data (NLOD) tilgjengeliggjort av Brønnøysundregistrene."
-- See [`docs/dependencies-and-licenses.md`](file:///Users/apple/Downloads/signalpost-starter-kit/docs/dependencies-and-licenses.md) for the complete dependency inventory.
+- See [`docs/dependencies-and-licenses.md`](docs/dependencies-and-licenses.md) for the complete dependency inventory.
 
 ---
 
@@ -363,7 +363,7 @@ OrgTrace uses a dual evaluation strategy:
 - **Calculated Paid Cost (with Brave Search fallback)**: **$0.15 USD** (~30 queries @ $0.005)
 - **Free-Tier Cost**: **$0.00 USD**
 
-See [`docs/cost-analysis.md`](file:///Users/apple/Downloads/signalpost-starter-kit/docs/cost-analysis.md) for details.
+See [`docs/cost-analysis.md`](docs/cost-analysis.md) for details.
 
 ---
 
@@ -382,7 +382,7 @@ See [`docs/cost-analysis.md`](file:///Users/apple/Downloads/signalpost-starter-k
 - **Zero Scraping Policy**: Data from restricted platforms (`proff.no`, `purehelp.no`, `linkedin.com`) is not scraped, strictly adhering to terms of service.
 - **API Rate Limits**: Brønnøysundregistrene public APIs cap burst concurrency (worker threads capped at 8).
 
-See [`docs/limitations.md`](file:///Users/apple/Downloads/signalpost-starter-kit/docs/limitations.md) for full disclosure.
+See [`docs/limitations.md`](docs/limitations.md) for full disclosure.
 
 ---
 
@@ -390,7 +390,7 @@ See [`docs/limitations.md`](file:///Users/apple/Downloads/signalpost-starter-kit
 
 1. Verify environment: `python3 --version` (requires Python >= 3.12).
 2. Install dependencies: `pip install -r requirements.txt`.
-3. Verify manifest: Inspect [`MANIFEST.json`](file:///Users/apple/Downloads/signalpost-starter-kit/MANIFEST.json) for exact input/output hashes and commit SHA.
+3. Verify manifest: Inspect [`MANIFEST.json`](MANIFEST.json) for exact input/output hashes and commit SHA.
 4. Execute benchmark: `./scripts/run_competition.sh eval`.
 5. Execute batch: `./scripts/run_competition.sh full`.
 
@@ -418,7 +418,7 @@ All 254 tests must pass with 0 failures.
 - **Submission Repository**: `namandeeptripathi/OrgTrace`
 - **One-Command Execution**: `./scripts/run_competition.sh`
 - **Evaluation Command**: `PYTHONPATH=src uv run python -m norway_company_agent.evaluation`
-- **Output Manifest**: [`MANIFEST.json`](file:///Users/apple/Downloads/signalpost-starter-kit/MANIFEST.json)
-- **Verified Batch**: 1,000 completed company profiles in [`out/envelopes.jsonl`](file:///Users/apple/Downloads/signalpost-starter-kit/out/envelopes.jsonl)
+- **Output Manifest**: [`MANIFEST.json`](MANIFEST.json)
+- **Verified Batch**: 1,000 completed company profiles in [`out/envelopes.jsonl`](out/envelopes.jsonl)
 - **Third-Party Cost per 100 Profiles**: **$0.00 USD** (measured baseline) / **$0.15 USD** (calculated with search discovery fallback)
 - **Declared Models & APIs**: Brønnøysundregistrene Enhetsregisteret (NLOD 2.0), Regnskapsregisteret (NLOD 2.0), Brave Search API (Commercial, optional).

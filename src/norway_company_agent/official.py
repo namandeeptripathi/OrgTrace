@@ -171,14 +171,28 @@ def normalize_entity(body: Any) -> dict[str, Any]:
 
 
 def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
-    if result.status == 200:
+    if result.status == 200 and not result.error:
         return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
     if result.status in {404, 410}:
         return evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
-    return evidence(field, "source_error", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    if result.status == 429:
+        return evidence(field, "rate_limited", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    err = str(result.error or "").lower()
+    if "timeout" in err or "timed out" in err:
+        return evidence(field, "timeout", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    if "budget" in err or "exhausted" in err:
+        return evidence(field, "not_attempted", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    if "jsondecodeerror" in err or "parse" in err:
+        return evidence(field, "parse_failed", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+    return evidence(field, "unavailable", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
 
 
-def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str], FetchResult] = fetch_json) -> tuple[dict[str, Any], list[FetchResult]]:
+def fetch_official_modules(
+    org: str,
+    modules: set[str],
+    fetcher: Callable[[str], FetchResult] = fetch_json,
+    guard: Any = None,
+) -> tuple[dict[str, Any], list[FetchResult]]:
     records: dict[str, Any] = {}
     metrics: list[FetchResult] = []
     endpoints = {
@@ -192,7 +206,12 @@ def fetch_official_modules(org: str, modules: set[str], fetcher: Callable[[str],
     for module, (url, source_type) in endpoints.items():
         if module not in modules:
             continue
-        result = _fetch_history(url) if module == "financial_history" and fetcher is fetch_json else fetcher(url)
+        if module == "financial_history" and fetcher is fetch_json:
+            result = _fetch_history(url)
+        elif fetcher is fetch_json and guard is not None:
+            result = fetch_json(url, guard=guard)
+        else:
+            result = fetcher(url)
         metrics.append(result)
         normalized = None
         if result.status == 200:

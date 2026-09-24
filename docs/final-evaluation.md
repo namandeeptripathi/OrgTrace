@@ -115,7 +115,7 @@ This document records the empirical results of the complete test suite, the Stag
 
 ## 4. Test Suite Breakdown (254 Tests)
 
-The 254 tests in [`tests/test_poc.py`](file:///Users/apple/Downloads/signalpost-starter-kit/tests/test_poc.py) cover all implemented capabilities across Stages 0 through 11:
+The 254 tests in [`tests/test_poc.py`](tests/test_poc.py) cover all implemented capabilities across Stages 0 through 11:
 
 - **Stage 0 Baseline & Sampling**: `test_bulk_iterator`, `test_org_number_validation`, `test_read_organisation_inputs`.
 - **Stage 1 Identity Engine**: `test_canonicalize_org_number`, `test_luhn_modulo11`, `test_exact_name_matching`, `test_legal_form_normalization`, `test_subsidiary_rejection`, `test_parent_company_rejection`.

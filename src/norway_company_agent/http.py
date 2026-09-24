@@ -14,12 +14,13 @@ import hashlib
 import json
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
-from .resilience import parse_retry_after
+from .resilience import CompetitionExecutionGuard, classify_failure, parse_retry_after
 from .url_safety import assert_public_url, sanitize_url_for_logging
 
 
@@ -43,7 +44,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchResult:
+def fetch_json(
+    url: str,
+    *,
+    timeout: float = 20.0,
+    attempts: int = 3,
+    guard: CompetitionExecutionGuard | None = None,
+) -> FetchResult:
     """Fetch JSON from a URL with URL safety validation and bounded retries."""
     # 1. URL Safety Check
     try:
@@ -52,7 +59,16 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
         sanitized = sanitize_url_for_logging(url)
         return FetchResult(sanitized, 0, 0, 0, error=f"Blocked unsafe URL: {exc}", retrieved_at=_utc_now())
 
+    # 2. Budget Guard Check
+    if guard is not None:
+        allowed, reason = guard.acquire_request()
+        if not allowed:
+            return FetchResult(url, 0, 0, 0, error=f"Execution budget exhausted: {reason}", retrieved_at=_utc_now())
+
+    domain = urllib.parse.urlparse(url).hostname or "unknown"
     last_error = "request failed"
+    res: FetchResult | None = None
+
     for attempt in range(attempts):
         started = time.monotonic()
         request = urllib.request.Request(
@@ -70,9 +86,10 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
                 try:
                     parsed_body = json.loads(raw)
                 except Exception as json_exc:
-                    return FetchResult(url, response.status, elapsed, len(raw), error=f"JSONDecodeError: {json_exc}", content_sha256=sha, retrieved_at=_utc_now())
+                    res = FetchResult(url, response.status, elapsed, len(raw), error=f"JSONDecodeError: {json_exc}", content_sha256=sha, retrieved_at=_utc_now())
+                    break
 
-                return FetchResult(
+                res = FetchResult(
                     url,
                     response.status,
                     elapsed,
@@ -81,6 +98,7 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
                     content_sha256=sha,
                     retrieved_at=_utc_now(),
                 )
+                break
 
         except urllib.error.HTTPError as exc:
             elapsed = int((time.monotonic() - started) * 1000)
@@ -89,7 +107,7 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
 
             # Non-retryable definitive client errors
             if exc.code in {400, 401, 403, 404, 410, 422}:
-                return FetchResult(
+                res = FetchResult(
                     url,
                     exc.code,
                     elapsed,
@@ -98,6 +116,7 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
                     content_sha256=sha,
                     retrieved_at=_utc_now(),
                 )
+                break
 
             last_error = f"HTTP {exc.code}"
 
@@ -114,4 +133,11 @@ def fetch_json(url: str, *, timeout: float = 20.0, attempts: int = 3) -> FetchRe
         if attempt + 1 < attempts:
             time.sleep(0.4 * (2**attempt))
 
-    return FetchResult(url, 0, 0, 0, error=last_error, retrieved_at=_utc_now())
+    if res is None:
+        res = FetchResult(url, 0, 0, 0, error=last_error, retrieved_at=_utc_now())
+
+    if guard is not None:
+        fail_cat = classify_failure(last_error if res.error else None, res.status) if res.error else None
+        guard.record_request_result(domain=domain, status_code=res.status, failure_category=fail_cat)
+
+    return res

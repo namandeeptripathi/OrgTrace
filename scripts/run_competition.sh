@@ -30,6 +30,7 @@ fi
 export PYTHONPATH="src:${PYTHONPATH:-}"
 
 MODE="${1:-full}"
+shift || true
 
 case "${MODE}" in
     full|--full)
@@ -37,24 +38,39 @@ case "${MODE}" in
         echo " OrgTrace: Running 1,000-Profile Competition Batch"
         echo "================================================================================"
         if [ ! -f "brreg-enheter.csv" ]; then
-            echo "ERROR: 'brreg-enheter.csv' not found. Please download it via:" >&2
-            echo "  curl -L 'https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv' -o brreg-enheter.csv" >&2
-            exit 1
+            echo "Notice: 'brreg-enheter.csv' not found. Attempting download from BRREG open data..."
+            if command -v curl >/dev/null 2>&1; then
+                curl -fSL 'https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv' -o brreg-enheter.csv || {
+                    echo "WARNING: Automatic download failed. Proceeding with live API fallback." >&2
+                }
+            fi
         fi
         if [ ! -f "entry-companies.jsonl" ]; then
-            echo "Notice: 'entry-companies.jsonl' not found. Generating from universe..."
-            ${PYTHON_CMD} select_entry_batch.py --universe signalpost-universe.jsonl.gz --count 1000 --output entry-companies.jsonl
+            if [ -f "signalpost-universe.jsonl.gz" ]; then
+                echo "Notice: 'entry-companies.jsonl' not found. Generating from universe..."
+                ${PYTHON_CMD} select_entry_batch.py --universe signalpost-universe.jsonl.gz --count 1000 --output entry-companies.jsonl
+            else
+                echo "ERROR: Neither 'entry-companies.jsonl' nor 'signalpost-universe.jsonl.gz' found." >&2
+                exit 1
+            fi
         fi
         mkdir -p out
+        BULK_ARGS=()
+        if [ -f "brreg-enheter.csv" ]; then
+            BULK_ARGS=(--bulk brreg-enheter.csv)
+        fi
         ${PYTHON_CMD} scripts/run_competition_batch.py \
             --organisations entry-companies.jsonl \
-            --bulk brreg-enheter.csv \
+            "${BULK_ARGS[@]}" \
             --profiles-output out/profiles.jsonl \
             --output out/envelopes.jsonl \
             --report out/run-report.json \
             --run-id competition-final-001 \
             --expected-count 1000 \
-            --modules registry,accounting_obligation
+            --max-requests 2000 \
+            --max-cost 10.0 \
+            --max-runtime 2700.0 \
+            --modules registry,accounting_obligation "$@"
         echo ""
         echo "SUCCESS: 1,000-profile batch complete."
         echo "  - Envelopes: out/envelopes.jsonl"
@@ -65,34 +81,66 @@ case "${MODE}" in
         echo "================================================================================"
         echo " OrgTrace: Running 10-Profile Smoke Batch"
         echo "================================================================================"
-        if [ ! -f "brreg-enheter.csv" ]; then
-            echo "ERROR: 'brreg-enheter.csv' not found." >&2
-            exit 1
+        SMOKE_SRC="smoke-companies.jsonl"
+        if [ ! -f "${SMOKE_SRC}" ]; then
+            if [ -f "data/smoke-companies.jsonl" ]; then
+                SMOKE_SRC="data/smoke-companies.jsonl"
+            else
+                echo "ERROR: No smoke company input file found." >&2
+                exit 1
+            fi
         fi
         mkdir -p out
+        BULK_ARGS=()
+        if [ -f "brreg-enheter.csv" ]; then
+            BULK_ARGS=(--bulk brreg-enheter.csv)
+        else
+            echo "Notice: 'brreg-enheter.csv' not found. Using live Brreg open API fallback."
+        fi
         ${PYTHON_CMD} scripts/run_competition_batch.py \
-            --organisations smoke-companies.jsonl \
-            --bulk brreg-enheter.csv \
+            --organisations "${SMOKE_SRC}" \
+            "${BULK_ARGS[@]}" \
             --profiles-output out/smoke-profiles.jsonl \
             --output out/smoke-envelopes.jsonl \
             --report out/smoke-report.json \
             --run-id smoke-final-001 \
             --expected-count 10 \
-            --modules registry,accounting_obligation
+            --max-requests 2000 \
+            --max-cost 10.0 \
+            --max-runtime 2700.0 \
+            --modules registry,accounting_obligation "$@"
         echo ""
         echo "SUCCESS: Smoke batch complete. Output: out/smoke-envelopes.jsonl"
         ;;
     eval|--eval|evaluation)
         echo "================================================================================"
-        echo " OrgTrace: Running Stage 10 Evaluation & Optimization Benchmark"
+        echo " OrgTrace: Running Competition Evaluation Harness"
+        echo "================================================================================"
+        if [ -f "scripts/run_competition_evaluation.py" ]; then
+            EVAL_ARGS=("$@")
+            if [ ${#EVAL_ARGS[@]} -eq 0 ]; then
+                EVAL_ARGS=(--random 10 --seed 42)
+            fi
+            ${PYTHON_CMD} scripts/run_competition_evaluation.py "${EVAL_ARGS[@]}"
+        else
+            ${PYTHON_CMD} -m norway_company_agent.evaluation
+        fi
+        ;;
+    eval-legacy|--eval-legacy)
+        echo "================================================================================"
+        echo " OrgTrace: Running Stage 10 Evaluation Benchmark"
         echo "================================================================================"
         ${PYTHON_CMD} -m norway_company_agent.evaluation
         ;;
     test|--test)
         echo "================================================================================"
-        echo " OrgTrace: Running Full Test Suite (254 tests)"
+        echo " OrgTrace: Running Test Suite"
         echo "================================================================================"
-        ${PYTHON_CMD} -m unittest tests.test_poc -v
+        if ${PYTHON_CMD} -m pytest --version >/dev/null 2>&1; then
+            ${PYTHON_CMD} -m pytest "$@"
+        else
+            ${PYTHON_CMD} -m unittest tests.test_poc -v
+        fi
         ;;
     replay|--replay)
         echo "================================================================================"
@@ -101,24 +149,25 @@ case "${MODE}" in
         mkdir -p out
         ${PYTHON_CMD} scripts/run_refresh_replay.py \
             --manifest tests/fixtures/refresh-snapshots.json \
-            --output out/refresh-demo.json
+            --output out/refresh-demo.json "$@"
         ;;
     manifest|--manifest)
         echo "================================================================================"
         echo " OrgTrace: Regenerating Reproducibility MANIFEST.json"
         echo "================================================================================"
-        ${PYTHON_CMD} scripts/generate_manifest.py
+        ${PYTHON_CMD} scripts/generate_manifest.py "$@"
         ;;
     help|--help|-h)
-        echo "Usage: ./scripts/run_competition.sh [full|smoke|eval|test|replay|manifest]"
+        echo "Usage: ./scripts/run_competition.sh [full|smoke|eval|eval-legacy|test|replay|manifest]"
         echo ""
         echo "Modes:"
-        echo "  full      Run 1,000-profile competition batch (default)"
-        echo "  smoke     Run 10-profile smoke batch"
-        echo "  eval      Run Stage 10 Evaluation & Optimization Harness"
-        echo "  test      Run full 254-test suite"
-        echo "  replay    Run deterministic refresh replay demonstration"
-        echo "  manifest  Regenerate MANIFEST.json"
+        echo "  full         Run 1,000-profile competition batch (default)"
+        echo "  smoke        Run 10-profile smoke batch"
+        echo "  eval         Run Stage 18 Competition Evaluation Harness (--random 10 --seed 42)"
+        echo "  eval-legacy  Run Stage 10 Evaluation & Optimization Harness"
+        echo "  test         Run test suite (pytest or unittest)"
+        echo "  replay       Run deterministic refresh replay demonstration"
+        echo "  manifest     Regenerate MANIFEST.json"
         ;;
     *)
         echo "Unknown mode: ${MODE}. Use './scripts/run_competition.sh --help' for usage." >&2
