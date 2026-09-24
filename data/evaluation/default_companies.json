@@ -1,0 +1,372 @@
+[
+  {
+    "case_id": "eval-001",
+    "query": "Equinor ASA",
+    "expected_org_number": "923609016",
+    "expected_name": "Equinor ASA",
+    "expected_website": "https://www.equinor.com",
+    "category": "known_valid",
+    "description": "Large Norwegian energy enterprise with comprehensive public registry filings, accounts, and leadership."
+  },
+  {
+    "case_id": "eval-002",
+    "query": "DNB Bank ASA",
+    "expected_org_number": "984851006",
+    "expected_name": "DNB Bank ASA",
+    "expected_website": "https://www.dnb.no",
+    "category": "rich_public_info",
+    "description": "Major Norwegian financial institution with statutory annual accounts and corporate governance."
+  },
+  {
+    "case_id": "eval-003",
+    "query": "Telenor ASA",
+    "expected_org_number": "998848354",
+    "expected_name": "Telenor ASA",
+    "expected_website": "https://www.telenor.com",
+    "category": "rich_public_info",
+    "description": "Multinational telecommunications operator with extensive public footprint."
+  },
+  {
+    "case_id": "eval-004",
+    "query": "Kongsberg Gruppen ASA",
+    "expected_org_number": "943753703",
+    "expected_name": "Kongsberg Gruppen ASA",
+    "expected_website": "https://www.kongsberg.com",
+    "category": "rich_public_info",
+    "description": "Defense, maritime, and digital technology corporation."
+  },
+  {
+    "case_id": "eval-005",
+    "query": "Orkla ASA",
+    "expected_org_number": "910747711",
+    "expected_name": "Orkla ASA",
+    "expected_website": "https://www.orkla.no",
+    "category": "rich_public_info",
+    "description": "Major consumer goods conglomerate with diverse business units and group structure."
+  },
+  {
+    "case_id": "eval-006",
+    "query": "Mowi ASA",
+    "expected_org_number": "924887968",
+    "expected_name": "Mowi ASA",
+    "expected_website": "https://mowi.com",
+    "category": "rich_public_info",
+    "description": "Global seafood and aquaculture producer."
+  },
+  {
+    "case_id": "eval-007",
+    "query": "Tomra Systems ASA",
+    "expected_org_number": "926569661",
+    "expected_name": "Tomra Systems ASA",
+    "expected_website": "https://www.tomra.com",
+    "category": "rich_public_info",
+    "description": "Circular economy and sensor-based sorting solutions provider."
+  },
+  {
+    "case_id": "eval-008",
+    "query": "Gjensidige Forsikring ASA",
+    "expected_org_number": "995568217",
+    "expected_name": "Gjensidige Forsikring ASA",
+    "expected_website": "https://www.gjensidige.no",
+    "category": "rich_public_info",
+    "description": "Leading Nordic general insurance group."
+  },
+  {
+    "case_id": "eval-009",
+    "query": "Schibsted ASA",
+    "expected_org_number": "933739384",
+    "expected_name": "Schibsted ASA",
+    "expected_website": "https://schibsted.com",
+    "category": "rich_public_info",
+    "description": "Nordic media and digital brand destination."
+  },
+  {
+    "case_id": "eval-010",
+    "query": "Yara International ASA",
+    "expected_org_number": "986228608",
+    "expected_name": "Yara International ASA",
+    "expected_website": "https://www.yara.com",
+    "category": "rich_public_info",
+    "description": "Global crop nutrition and industrial nitrogen chemical producer."
+  },
+  {
+    "case_id": "eval-011",
+    "query": "FJELLGLØD HOLDING AS",
+    "expected_org_number": "935095190",
+    "expected_name": "FJELLGLØD HOLDING AS",
+    "expected_website": null,
+    "category": "limited_info",
+    "description": "Holding entity with no employees and no commercial website; must abstain from hallucinating web domains."
+  },
+  {
+    "case_id": "eval-012",
+    "query": "BEAUMONT HOLDING AS",
+    "expected_org_number": "997830792",
+    "expected_name": "BEAUMONT HOLDING AS",
+    "expected_website": null,
+    "category": "limited_info",
+    "description": "Real estate investment holding company without public website."
+  },
+  {
+    "case_id": "eval-013",
+    "query": "Vestland Stillasmontering ENK",
+    "expected_org_number": "933444555",
+    "expected_name": "Vestland Stillasmontering ENK",
+    "expected_website": null,
+    "category": "limited_info",
+    "description": "Sole proprietorship (ENK) with weak web presence and minimal statutory filing requirement."
+  },
+  {
+    "case_id": "eval-014",
+    "query": "Nordic Design Studio Ola Nordmann",
+    "expected_org_number": "944555666",
+    "expected_name": "Nordic Design Studio Ola Nordmann",
+    "expected_website": null,
+    "category": "incomplete_data",
+    "description": "Exempt ENK with no statutory annual accounts filing; missing preserved as null, never zero."
+  },
+  {
+    "case_id": "eval-015",
+    "query": "BOAR COLLECT AS",
+    "expected_org_number": "998487099",
+    "expected_name": "BOAR COLLECT AS",
+    "expected_website": null,
+    "category": "incomplete_data",
+    "description": "Design AS with null employee count and no website recorded in Brreg."
+  },
+  {
+    "case_id": "eval-016",
+    "query": "SKYA MARKEDSFØRING AS",
+    "expected_org_number": "926320459",
+    "expected_name": "SKYA MARKEDSFØRING AS",
+    "expected_website": null,
+    "category": "incomplete_data",
+    "description": "Small marketing agency AS with limited filing history."
+  },
+  {
+    "case_id": "eval-017",
+    "query": "Aker BP ASA",
+    "expected_org_number": "989795848",
+    "expected_name": "Aker BP ASA",
+    "expected_website": "https://akerbp.com",
+    "category": "similar_names",
+    "description": "Exploration and production company belonging to the Aker family of similarly named entities."
+  },
+  {
+    "case_id": "eval-018",
+    "query": "Aker Solutions ASA",
+    "expected_org_number": "996469776",
+    "expected_name": "Aker Solutions ASA",
+    "expected_website": "https://www.akersolutions.com",
+    "category": "similar_names",
+    "description": "Engineering and industrial service provider with related brand name."
+  },
+  {
+    "case_id": "eval-019",
+    "query": "Aker Horizons ASA",
+    "expected_org_number": "925977977",
+    "expected_name": "Aker Horizons ASA",
+    "expected_website": "https://akerhorizons.com",
+    "category": "similar_names",
+    "description": "Green technology investor with similar parent brand tokens."
+  },
+  {
+    "case_id": "eval-020",
+    "query": "Norsk Fiskeeksport AS",
+    "expected_org_number": "923609016",
+    "expected_name": "Norsk Fiskeeksport AS",
+    "expected_website": "https://norskfiske.no",
+    "category": "similar_names",
+    "description": "Seafood export company; must not be conflated with similarly named fish import entities."
+  },
+  {
+    "case_id": "eval-021",
+    "query": "Norsk Fiskeimport AS",
+    "expected_org_number": "999111222",
+    "expected_name": "Norsk Fiskeimport AS",
+    "expected_website": null,
+    "category": "similar_names",
+    "description": "Seafood import company; tests rejection of false attribution against Norsk Fiskeeksport AS."
+  },
+  {
+    "case_id": "eval-022",
+    "query": "BRANDMAKER AS",
+    "expected_org_number": "982942942",
+    "expected_name": "BRANDMAKER AS",
+    "expected_website": null,
+    "category": "similar_names",
+    "description": "Bergen-based graphic design company with generic brand token."
+  },
+  {
+    "case_id": "eval-023",
+    "query": "WYSSEN NORGE AS",
+    "expected_org_number": "916340257",
+    "expected_name": "WYSSEN NORGE AS",
+    "expected_website": "https://www.wyssenavalanche.com",
+    "category": "difficult_website",
+    "description": "Norwegian subsidiary of Swiss avalanche safety firm with cross-border domain."
+  },
+  {
+    "case_id": "eval-024",
+    "query": "AAS ELEKTRONIKK AS",
+    "expected_org_number": "888567232",
+    "expected_name": "AAS ELEKTRONIKK AS",
+    "expected_website": "http://www.aelektronikk.no",
+    "category": "difficult_website",
+    "description": "Engineering consultancy whose domain (aelektronikk.no) contracts the legal name tokens."
+  },
+  {
+    "case_id": "eval-025",
+    "query": "ARKITEKTFIRMA JON VIKØREN AS",
+    "expected_org_number": "985589003",
+    "expected_name": "ARKITEKTFIRMA JON VIKØREN AS",
+    "expected_website": null,
+    "category": "difficult_website",
+    "description": "Regional architectural practice with no statutory website recorded."
+  },
+  {
+    "case_id": "eval-026",
+    "query": "SAMEIET LENSMANNSTUNET 1",
+    "expected_org_number": "925800023",
+    "expected_name": "SAMEIET LENSMANNSTUNET 1",
+    "expected_website": null,
+    "category": "size_industry_diversity",
+    "description": "Condominium housing association (ESEK); has no commercial website and should abstain safely."
+  },
+  {
+    "case_id": "eval-027",
+    "query": "BONDELIA I BORETTSLAG",
+    "expected_org_number": "982669251",
+    "expected_name": "BONDELIA I BORETTSLAG",
+    "expected_website": null,
+    "category": "size_industry_diversity",
+    "description": "Housing cooperative (BRL) with statutory board but no public corporate homepage."
+  },
+  {
+    "case_id": "eval-028",
+    "query": "Bergen Teknologi ASA",
+    "expected_org_number": "955666777",
+    "expected_name": "Bergen Teknologi ASA",
+    "expected_website": "https://bergentek.no",
+    "category": "historical_change",
+    "description": "Technology firm that underwent legal re-registration from AS to ASA with updated revenue.",
+    "baseline_profile": {
+      "organisation_number": "955666777",
+      "name": "Bergen Teknologi AS",
+      "legal_form": "AS",
+      "website": "https://bergentek.no",
+      "evidence": {
+        "registry": {
+          "status": "available",
+          "value": {
+            "name": "Bergen Teknologi AS",
+            "legal_form": "AS"
+          }
+        },
+        "financials": {
+          "status": "available",
+          "value": {
+            "records": [
+              {
+                "period": "2024",
+                "revenue": 45000000.0,
+                "operating_result": 5000000.0
+              }
+            ]
+          }
+        }
+      }
+    },
+    "expected_changes": [
+      {
+        "field": "legal_name",
+        "old_value": "Bergen Teknologi AS",
+        "new_value": "Bergen Teknologi ASA",
+        "change_type": "modified"
+      },
+      {
+        "field": "legal_form",
+        "old_value": "AS",
+        "new_value": "ASA",
+        "change_type": "modified"
+      }
+    ]
+  },
+  {
+    "case_id": "eval-029",
+    "query": "Fjord Seafood Group ASA",
+    "expected_org_number": "987654321",
+    "expected_name": "Fjord Seafood Group ASA",
+    "expected_website": "https://fjordgroup.no",
+    "category": "historical_change",
+    "description": "Seafood group with historical workforce baseline expansion.",
+    "baseline_profile": {
+      "organisation_number": "987654321",
+      "name": "Fjord Seafood Group ASA",
+      "employees": 120,
+      "website": "https://fjordgroup.no"
+    },
+    "expected_changes": [
+      {
+        "field": "employees",
+        "old_value": 120,
+        "new_value": 180,
+        "change_type": "modified"
+      }
+    ]
+  },
+  {
+    "case_id": "eval-030",
+    "query": "Norsk Fisk",
+    "expected_org_number": null,
+    "expected_name": null,
+    "expected_website": null,
+    "category": "ambiguous",
+    "description": "Generic non-specific query matching dozens of distinct entities without unique org number."
+  },
+  {
+    "case_id": "eval-031",
+    "query": "Swedish Fish Export AB",
+    "expected_org_number": null,
+    "expected_name": null,
+    "expected_website": null,
+    "category": "non_target",
+    "description": "Foreign non-Norwegian directory listing (AB); must be rejected as outside target jurisdiction."
+  },
+  {
+    "case_id": "eval-032",
+    "query": "999999999",
+    "expected_org_number": null,
+    "expected_name": null,
+    "expected_website": null,
+    "category": "not_found",
+    "description": "Invalid / unassigned Modulo 11 organisation number."
+  },
+  {
+    "case_id": "eval-033",
+    "query": "Statkraft AS",
+    "expected_org_number": "987059729",
+    "expected_name": "Statkraft AS",
+    "expected_website": "https://www.statkraft.com",
+    "category": "size_industry_diversity",
+    "description": "State-owned major renewable power producer in Norway."
+  },
+  {
+    "case_id": "eval-034",
+    "query": "Posten Bring AS",
+    "expected_org_number": "984661185",
+    "expected_name": "Posten Bring AS",
+    "expected_website": "https://www.postenbring.com",
+    "category": "size_industry_diversity",
+    "description": "National postal and logistics provider."
+  },
+  {
+    "case_id": "eval-035",
+    "query": "Veidekke ASA",
+    "expected_org_number": "926806666",
+    "expected_name": "Veidekke ASA",
+    "expected_website": "https://www.veidekke.no",
+    "category": "size_industry_diversity",
+    "description": "Leading civil engineering and construction contractor."
+  }
+]

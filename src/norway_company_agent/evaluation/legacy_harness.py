@@ -26,13 +26,13 @@ import time
 from typing import Any, Callable
 import urllib.parse
 
-from .change_intelligence import (
+from ..change_intelligence import (
     ChangeType,
     MaterialChangeRecord,
     is_material_change,
     normalize_semantic_value,
 )
-from .evaluation_dataset import (
+from ..evaluation_dataset import (
     CaseCategory,
     EvaluationCase,
     ExpectedOutcome,
