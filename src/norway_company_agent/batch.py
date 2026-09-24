@@ -231,6 +231,41 @@ def evidence_terminal_state(record: dict[str, Any] | None) -> str:
     return "submission_error"
 
 
+def compute_profile_status(profile: dict[str, Any]) -> str:
+    """Compute frontend-ready status for a company profile.
+
+    Distinguishes actual states without conflating them:
+    - 'complete': All requested evidence modules are available.
+    - 'partial': Some modules available, others missing/not_found/unavailable/blocked/timeout.
+    - 'not_found': All modules not found.
+    - 'unavailable': Modules failed due to upstream network/service unavailability.
+    - 'blocked': Disallowed by policy or robots.txt.
+    - 'timeout': Upstream timeout.
+    - 'failed': Execution failure or unhandled error.
+    """
+    if profile.get("run_metrics", {}).get("status") == "failed":
+        return "failed"
+    evidence_dict = profile.get("evidence", {})
+    if not evidence_dict:
+        return "failed"
+    statuses = [rec.get("status") for rec in evidence_dict.values() if isinstance(rec, dict)]
+    if not statuses:
+        return "failed"
+    if all(s == "available" for s in statuses):
+        return "complete"
+    if any(s == "available" for s in statuses):
+        return "partial"
+    if all(s == "not_found" for s in statuses):
+        return "not_found"
+    if any(s == "unavailable" for s in statuses):
+        return "unavailable"
+    if any(s == "blocked" for s in statuses):
+        return "blocked"
+    if any(s == "timeout" for s in statuses):
+        return "timeout"
+    return "failed"
+
+
 def terminal_envelope(
     profile: dict[str, Any],
     *,
@@ -248,10 +283,13 @@ def terminal_envelope(
             "final_timestamp": (record or {}).get("retrieved_at") or completed_at,
         }
     entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
+    profile_status = profile.get("status") or compute_profile_status(profile)
+    profile["status"] = profile_status
     return {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
         "state": entity_state,
+        "status": profile_status,
         "started_at": started_at,
         "completed_at": completed_at,
         "modules": module_states,

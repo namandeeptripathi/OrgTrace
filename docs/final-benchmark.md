@@ -16,7 +16,7 @@ Every metric, count, percentage, latency, request count, and failure categorizat
 | **Terminal Validation** | Envelope Contract Validation | **Passed (5/5 checks)** | 100% valid terminal states | ✅ PASS |
 | **Wall-Clock Runtime** | Total Execution Time | **227.76s (3m 47.8s)** | ≤ 2,700.0s (45.0 min) | ✅ PASS (8.4% used) |
 | **Throughput** | Effective Processing Rate | **0.228s / profile** | ≤ 2.70s / profile | ✅ PASS (4.39 profiles/s) |
-| **External Requests** | Total Live HTTP Requests | **1,618 requests** | ≤ 2,000 requests | ✅ PASS (80.9% used) |
+| **External Requests** | Actual External Requests (`actual_external_requests`) | **1,618 requests (382 remaining)** | ≤ 2,000 requests | ✅ PASS (80.9% used) |
 | **Request Success Rate**| HTTP Success vs Failed | **1,602 / 16 (99.01%)** | ≥ 95.0% | ✅ PASS |
 | **External API Cost** | Incurred Third-Party Spend | **$0.0000 USD** | ≤ $10.00 USD | ✅ PASS ($10.00 left) |
 | **Explanation Grounding**| Average Claim Grounded Rate | **1.000 (100.0%)** | 100.0% evidence-grounded | ✅ PASS |
@@ -188,11 +188,14 @@ Silent Drops / Lost Records:      0 (100.0% audit verified)
 - **Successful Requests per Profile**: **1.602 requests / profile**
 - **HTTP Retries Required**: **0 retries**
 - **HTTP Retry Rate**: **0.00%**
-- **Rate-Limit (429) Encounters**: **0 (0.00%)**
 - **Execution Budget Status**:
-  - Request Limit: 2,000 | Used: 1,310 (tracked) / 1,618 (total wire) | **Budget Consumed: 65.5%**
-  - Cost Limit: $10.00 | Incurred: $0.0000 | **Budget Consumed: 0.0%**
-  - Runtime Limit: 2,700s | Elapsed: 227.76s | **Budget Consumed: 8.4%**
+  - Competition Request Limit (`request_limit`): **2,000 requests**
+  - Authoritative External Requests (`actual_external_requests`): **1,618 requests**
+  - Competition Budget Remaining (`request_budget_remaining`): **382 requests**
+  - Budget Consumed (`request_budget_consumed_percent`): **80.9%** (1,618 / 2,000)
+  - Concurrency Guard Reservations (`tracked_requests`): 1,310 requests (internally reserved permits)
+  - Cost Limit: $10.00 | Incurred: $0.0000 | **Budget Consumed: 0.0%** ($10.00 remaining)
+  - Runtime Limit: 2,700s | Elapsed: 227.76s | **Budget Consumed: 8.4%** (2,472.24s remaining)
 
 #### Top 20 Contacted Domains:
 | Domain | Host Type | Requests Issued | Status Code Distribution |
@@ -379,6 +382,6 @@ The Stage 20 Final 1,000+ Profile Benchmark empirically demonstrates that **OrgT
 
 1. **Scale**: Successfully processed 1,000 distinct Norwegian companies with 0 silent drops.
 2. **Speed**: Finished in **3m 48s**, consuming only **8.4%** of the 45-minute runtime ceiling.
-3. **Efficiency**: Issued **1,618 HTTP requests**, consuming only **80.9%** of the 2,000 request limit and **$0.00** in API fees.
+3. **Efficiency**: Issued **1,618 actual external HTTP requests** (consuming 80.9% of the 2,000 request ceiling, with 382 requests remaining) and **$0.00** in API fees.
 4. **Resilience**: Handled dead websites, timeouts, upstream 500 errors, and robots.txt restrictions without crashing or losing data.
 5. **Quality**: Emitted 100% evidence-grounded claims with complete cryptographic provenance.

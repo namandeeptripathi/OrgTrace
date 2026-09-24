@@ -296,6 +296,7 @@ class CompetitionExecutionGuard:
         self.reduced_mode_remaining_requests = reduced_mode_remaining_requests
 
         self.requests_used = 0
+        self.actual_external_requests: int | None = None
         self.cost_incurred = 0.0
         self.start_time = time.monotonic()
         self.domain_requests: dict[str, int] = {}
@@ -303,6 +304,16 @@ class CompetitionExecutionGuard:
         self._reduced_mode_entered = False
         self._reduced_mode_logged = False
         self._stopped_reason: str | None = None
+
+    @property
+    def tracked_requests(self) -> int:
+        """Internally tracked request reservations."""
+        return self.requests_used
+
+    def record_actual_external_requests(self, count: int) -> None:
+        """Record authoritative wire-level HTTP request count for competition reporting."""
+        with self._lock:
+            self.actual_external_requests = count
 
     @property
     def elapsed_seconds(self) -> float:
@@ -314,7 +325,8 @@ class CompetitionExecutionGuard:
 
     @property
     def remaining_requests(self) -> int:
-        return max(0, self.max_requests - self.requests_used)
+        eff = self.actual_external_requests if self.actual_external_requests is not None else self.requests_used
+        return max(0, self.max_requests - eff)
 
     @property
     def remaining_cost(self) -> float:
@@ -380,17 +392,17 @@ class CompetitionExecutionGuard:
             if failure_category is not None:
                 self.failures_by_category[failure_category] = self.failures_by_category.get(failure_category, 0) + 1
 
-    def format_request_budget(self) -> str:
+    def format_request_budget(self, actual_external_requests: int | None = None) -> str:
         """Render request budget summary card."""
         with self._lock:
-            used = self.requests_used
+            actual = actual_external_requests if actual_external_requests is not None else (self.actual_external_requests if self.actual_external_requests is not None else self.requests_used)
             limit = self.max_requests
-            remaining = max(0, limit - used)
+            remaining = max(0, limit - actual)
         return (
             "Request budget\n"
             "--------------\n"
             f"Limit:      {limit:4d}\n"
-            f"Used:       {used:4d}\n"
+            f"Used:       {actual:4d}\n"
             f"Remaining:  {remaining:4d}"
         )
 
@@ -433,6 +445,7 @@ class CompetitionExecutionGuard:
         successful: int,
         partial: int,
         failed: int,
+        actual_external_requests: int | None = None,
     ) -> str:
         """Render batch completion summary card."""
         elapsed_sec = int(self.elapsed_seconds)
@@ -441,7 +454,7 @@ class CompetitionExecutionGuard:
         time_str = f"{m}m {s:02d}s" if m > 0 else f"{s}s"
 
         with self._lock:
-            used = self.requests_used
+            actual = actual_external_requests if actual_external_requests is not None else (self.actual_external_requests if self.actual_external_requests is not None else self.requests_used)
             limit = self.max_requests
 
         return (
@@ -450,17 +463,27 @@ class CompetitionExecutionGuard:
             f"Successful:{successful:>17d}\n"
             f"Partial:{partial:>20d}\n"
             f"Failed:{failed:>21d}\n\n"
-            f"External requests:     {used} / {limit}\n"
+            f"External requests:     {actual} / {limit}\n"
             f"Elapsed time:        {time_str}"
         )
 
-    def to_dict(self) -> dict[str, Any]:
+    def to_dict(self, actual_external_requests: int | None = None) -> dict[str, Any]:
         """Telemetry export for run report."""
         with self._lock:
+            actual = actual_external_requests if actual_external_requests is not None else self.actual_external_requests
+            eff = actual if actual is not None else self.requests_used
+            rem = max(0, self.max_requests - eff)
+            pct = round((eff / self.max_requests) * 100, 1) if self.max_requests > 0 else 0.0
+
             return {
                 "max_requests": self.max_requests,
-                "requests_used": self.requests_used,
-                "remaining_requests": self.remaining_requests,
+                "request_limit": self.max_requests,
+                "tracked_requests": self.requests_used,
+                "actual_external_requests": actual if actual is not None else self.requests_used,
+                "requests_used": eff,
+                "remaining_requests": rem,
+                "request_budget_remaining": rem,
+                "request_budget_consumed_percent": pct,
                 "max_cost": self.max_cost,
                 "cost_incurred": round(self.cost_incurred, 4),
                 "remaining_cost": round(self.remaining_cost, 4),

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT))
 
-from norway_company_agent.batch import profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
+from norway_company_agent.batch import compute_profile_status, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
 from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
@@ -259,6 +259,20 @@ def main() -> None:
         Path(args.explanations_output).parent.mkdir(parents=True, exist_ok=True)
         write_jsonl(Path(args.explanations_output), explanation_reports)
 
+    # Calculate batch completion outcomes and assign frontend-ready profile status
+    successful_count = 0
+    partial_count = 0
+    failed_count = 0
+    for profile in ordered_profiles:
+        status = compute_profile_status(profile)
+        profile["status"] = status
+        if status == "complete":
+            successful_count += 1
+        elif status == "partial":
+            partial_count += 1
+        else:
+            failed_count += 1
+
     envelopes = [
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
@@ -270,21 +284,11 @@ def main() -> None:
     operations["p50_ms"] = latencies[len(latencies) // 2] if latencies else None
     operations["p95_ms"] = latencies[min(len(latencies) - 1, int(len(latencies) * 0.95))] if latencies else None
 
-    # Calculate batch completion outcomes
-    successful_count = 0
-    partial_count = 0
-    failed_count = 0
-    for profile in ordered_profiles:
-        evidence_dict = profile.get("evidence", {})
-        statuses = [rec.get("status") for rec in evidence_dict.values() if isinstance(rec, dict)]
-        if profile.get("run_metrics", {}).get("status") == "failed" or not statuses:
-            failed_count += 1
-        elif all(s == "available" for s in statuses):
-            successful_count += 1
-        elif any(s == "available" for s in statuses):
-            partial_count += 1
-        else:
-            failed_count += 1
+    # Authoritative competition-facing request counting
+    actual_external_requests = operations["requests"]
+    guard.record_actual_external_requests(actual_external_requests)
+    operations["actual_external_requests"] = actual_external_requests
+    operations["tracked_requests"] = guard.tracked_requests
 
     report = {
         "run_id": args.run_id,
@@ -297,6 +301,13 @@ def main() -> None:
         "modules": requested_modules,
         "registry": registry_metadata,
         "operations": operations,
+        "request_budget": {
+            "request_limit": guard.max_requests,
+            "actual_external_requests": actual_external_requests,
+            "tracked_requests": guard.tracked_requests,
+            "request_budget_remaining": max(0, guard.max_requests - actual_external_requests),
+            "request_budget_consumed_percent": round((actual_external_requests / guard.max_requests) * 100, 1) if guard.max_requests > 0 else 0.0,
+        },
         "validation": validation,
         "batch_summary": {
             "attempted": len(orgs),
@@ -304,7 +315,7 @@ def main() -> None:
             "partial": partial_count,
             "failed": failed_count,
         },
-        "execution_guard": guard.to_dict(),
+        "execution_guard": guard.to_dict(actual_external_requests=actual_external_requests),
         "change_intelligence": {
             "total_evaluated": len(change_reports),
             "with_material_changes": sum(1 for cr in change_reports if cr.get("material_changes", 0) > 0),
@@ -325,9 +336,9 @@ def main() -> None:
 
     # Output formatted competition cards
     print("\n" + "=" * 60)
-    print(guard.format_batch_summary(len(orgs), successful_count, partial_count, failed_count))
+    print(guard.format_batch_summary(len(orgs), successful_count, partial_count, failed_count, actual_external_requests=actual_external_requests))
     print("-" * 60)
-    print(guard.format_request_budget())
+    print(guard.format_request_budget(actual_external_requests=actual_external_requests))
     print("-" * 60)
     print(guard.format_cost_budget())
     print("-" * 60)
