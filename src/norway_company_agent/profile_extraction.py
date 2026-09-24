@@ -24,6 +24,7 @@ class FieldStatus(str, Enum):
     NOT_FOUND = "not_found"
     UNAVAILABLE = "unavailable"
     EXTRACTION_FAILED = "extraction_failed"
+    CONFLICTING = "conflicting_sources"
 
 
 @dataclass
@@ -64,9 +65,22 @@ class ExtractedCompanyProfile:
     news: ExtractedField[list[dict[str, Any]]]
     structured_data_summary: dict[str, Any] = field(default_factory=dict)
     overall_status: str = "complete"
+    # Stage 14 Coverage Expansion fields:
+    products_and_services: ExtractedField[list[dict[str, Any]]] = field(
+        default_factory=lambda: ExtractedField("products_and_services", [], FieldStatus.UNAVAILABLE, note="Products and services source unavailable")
+    )
+    customers_and_markets: ExtractedField[dict[str, Any]] = field(
+        default_factory=lambda: ExtractedField("customers_and_markets", None, FieldStatus.UNAVAILABLE, note="Customer and market source unavailable")
+    )
+    certifications: ExtractedField[list[str]] = field(
+        default_factory=lambda: ExtractedField("certifications", [], FieldStatus.UNAVAILABLE, note="Certifications source unavailable")
+    )
+    corporate_governance: ExtractedField[dict[str, Any]] = field(
+        default_factory=lambda: ExtractedField("corporate_governance", None, FieldStatus.UNAVAILABLE, note="Corporate governance source unavailable")
+    )
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        data = {
             "organisation_number": self.organisation_number,
             "company_name": self.company_name,
             "description": self.description.to_dict(),
@@ -80,6 +94,15 @@ class ExtractedCompanyProfile:
             "structured_data_summary": self.structured_data_summary,
             "overall_status": self.overall_status,
         }
+        if self.products_and_services is not None:
+            data["products_and_services"] = self.products_and_services.to_dict()
+        if self.customers_and_markets is not None:
+            data["customers_and_markets"] = self.customers_and_markets.to_dict()
+        if self.certifications is not None:
+            data["certifications"] = self.certifications.to_dict()
+        if self.corporate_governance is not None:
+            data["corporate_governance"] = self.corporate_governance.to_dict()
+        return data
 
 
 # ============================================================================
@@ -218,7 +241,37 @@ def extract_description(
                     confidence=0.75,
                 )
 
-    # 5. Fallback to official registry industry label if present
+    # 5. Fallback to official statutory purpose from articles of association
+    purpose = profile.get("purpose")
+    if purpose and not website_value:
+        clean_purpose = " ".join(str(purpose).split())
+        return ExtractedField(
+            field_name="description",
+            value=f"Vedtektsfestet formål: {clean_purpose[:1000]}",
+            status=FieldStatus.FOUND,
+            source_url="https://data.brreg.no/enhetsregisteret/api/enheter",
+            source_type="official_registry_purpose",
+            evidence_span=clean_purpose[:300],
+            confidence=0.9,
+            note="Official statutory corporate purpose from Brønnøysundregistrene",
+        )
+
+    # 6. Fallback to registered activity
+    activity = profile.get("activity")
+    if activity and not website_value:
+        clean_act = " ".join(str(activity).split())
+        return ExtractedField(
+            field_name="description",
+            value=f"Registrert aktivitet: {clean_act[:1000]}",
+            status=FieldStatus.FOUND,
+            source_url="https://data.brreg.no/enhetsregisteret/api/enheter",
+            source_type="official_registry_activity",
+            evidence_span=clean_act[:300],
+            confidence=0.85,
+            note="Official registered activity from Brønnøysundregistrene",
+        )
+
+    # 7. Fallback to official registry industry label if present
     ind_label = profile.get("industry_label")
     if ind_label and not website_value:
         return ExtractedField(
@@ -390,22 +443,48 @@ def extract_contact(
                 city = city or post_match.group(2).strip()
                 evidence_parts.append(f"postal:{postal_code} {city}")
 
-    # 3. Official registry address fallback
+    # 3. Official registry address (authoritative legal headquarters)
     reg_addr = profile.get("business_address") or profile.get("forretningsadresse") or profile.get("postal_address") or profile.get("postadresse")
+    statutory_address = None
+    statutory_postal = None
+    statutory_city = None
+    statutory_country = "Norge"
+
     if isinstance(reg_addr, dict):
         raw_addr = reg_addr.get("adresse")
         if isinstance(raw_addr, list):
-            addr_str = ", ".join(str(x) for x in raw_addr if x)
+            statutory_address = ", ".join(str(x) for x in raw_addr if x)
         elif raw_addr:
-            addr_str = str(raw_addr)
-        else:
-            addr_str = None
-        address = address or addr_str
-        postal_code = postal_code or reg_addr.get("postnummer")
-        city = city or reg_addr.get("poststed") or reg_addr.get("kommune")
-        country = country or reg_addr.get("land") or "Norge"
-    elif profile.get("municipality") and not city:
-        city = profile.get("municipality")
+            statutory_address = str(raw_addr)
+        statutory_postal = reg_addr.get("postnummer")
+        statutory_city = reg_addr.get("poststed") or reg_addr.get("kommune")
+        statutory_country = reg_addr.get("land") or "Norge"
+    elif isinstance(reg_addr, str) and reg_addr.strip():
+        statutory_address = reg_addr.strip()
+        statutory_postal = profile.get("postal_code") or profile.get("postnummer")
+        statutory_city = profile.get("city") or profile.get("poststed") or profile.get("municipality")
+
+    # Authoritative statutory address takes precedence for registered office
+    address_divergence = None
+    if city and statutory_city and city.strip().lower() != statutory_city.strip().lower():
+        address_divergence = {
+            "operational_address": f"{address or ''}, {postal_code or ''} {city}".strip(", "),
+            "registered_headquarters": f"{statutory_address or ''}, {statutory_postal or ''} {statutory_city}".strip(", "),
+            "divergence_type": "operational_office_vs_registered_headquarters",
+        }
+
+    address = statutory_address or address
+    postal_code = statutory_postal or postal_code
+    city = statutory_city or city or profile.get("municipality")
+    country = statutory_country or country
+
+    # 4. Registry phone and email fallbacks
+    if not phone and profile.get("phone"):
+        phone = str(profile.get("phone")).strip()
+        evidence_parts.append(f"registry_phone:{phone}")
+    if not email and profile.get("email"):
+        email = str(profile.get("email")).strip()
+        evidence_parts.append(f"registry_email:{email}")
 
     # Normalize address string
     if isinstance(address, list):
@@ -424,11 +503,14 @@ def extract_contact(
             "phone": phone,
             "email": email,
         }
+        if address_divergence:
+            contact_dict["address_divergence"] = address_divergence
         evidence_str = "; ".join(filter(None, [
             f"address: {address}" if address else None,
             f"postal: {postal_code} {city}" if postal_code else None,
             f"phone: {phone}" if phone else None,
             f"email: {email}" if email else None,
+            f"divergence: {address_divergence['divergence_type']}" if address_divergence else None,
         ]))
         return ExtractedField(
             field_name="contact",
@@ -437,7 +519,7 @@ def extract_contact(
             source_url=source_url or "https://data.brreg.no/enhetsregisteret/api/enheter",
             source_type="website_and_registry" if website_value else "official_registry",
             evidence_span=evidence_str,
-            confidence=0.9 if (phone or email or address) else 0.75,
+            confidence=0.95 if (phone or email or address) else 0.75,
         )
 
     if not website_value and not reg_addr and not (structured_data and structured_data.get("json-ld")):
@@ -624,7 +706,11 @@ def extract_leadership(
                 # Look for patterns like "Navn Navnesen, Daglig leder" or "Navn Navnesen - CEO"
                 for line in p_text.splitlines():
                     line_clean = line.strip()
-                    for role_kw in ("daglig leder", "ceo", "styreleder", "cfo", "cto", "gründer", "founder"):
+                    for role_kw in (
+                        "daglig leder", "adm. dir", "administrerende direktør", "ceo",
+                        "chief executive officer", "styreleder", "styrets leder", "chair",
+                        "chairman", "board chair", "cfo", "cto", "gründer", "founder", "managing director",
+                    ):
                         pattern = rf"^([A-ZÆØÅ][a-zæøå]+(?:\s+[A-ZÆØÅ][a-zæøå]+)+)[\s,:\-]+({re.escape(role_kw)})\b"
                         match = re.search(pattern, line_clean, re.IGNORECASE)
                         if match:
@@ -921,6 +1007,387 @@ def extract_news(
 
 
 # ============================================================================
+# 3.5. STAGE 14 COVERAGE EXTENSION EXTRACTORS
+# ============================================================================
+
+CERTIFICATION_PATTERNS = [
+    (re.compile(r"\bISO\s*9001\b", re.I), "ISO 9001 (Quality Management)"),
+    (re.compile(r"\bISO\s*14001\b", re.I), "ISO 14001 (Environmental Management)"),
+    (re.compile(r"\bISO\s*27001\b", re.I), "ISO 27001 (Information Security)"),
+    (re.compile(r"\bISO\s*45001\b", re.I), "ISO 45001 (Occupational Health & Safety)"),
+    (re.compile(r"\bISO\s*22000\b", re.I), "ISO 22000 (Food Safety)"),
+    (re.compile(r"\bISO\s*13485\b", re.I), "ISO 13485 (Medical Devices)"),
+    (re.compile(r"\bMiljøfyrtårn\b", re.I), "Miljøfyrtårn (Eco-Lighthouse)"),
+    (re.compile(r"\bStartBANK\b", re.I), "StartBANK"),
+    (re.compile(r"\bAchilles\b", re.I), "Achilles"),
+    (re.compile(r"\bEcoVadis\b", re.I), "EcoVadis"),
+    (re.compile(r"\bMesterbedrift\b", re.I), "Mesterbedrift"),
+    (re.compile(r"\bSvanemerket\b", re.I), "Svanemerket (Nordic Swan Ecolabel)"),
+    (re.compile(r"\bFSC(?:-sertifisert)?\b", re.I), "FSC (Forest Stewardship Council)"),
+    (re.compile(r"\bPEFC\b", re.I), "PEFC (Programme for the Endorsement of Forest Certification)"),
+    (re.compile(r"\bDebio\b|\bØkologisk\s+landbruk\b", re.I), "Debio (Økologisk sertifisering)"),
+    (re.compile(r"\bCE-merk(?:et|ing)\b", re.I), "CE-merket"),
+    (re.compile(r"\bFairtrade\b", re.I), "Fairtrade"),
+]
+
+
+def extract_products_and_services(
+    profile: dict[str, Any],
+    website_value: dict[str, Any] | None,
+    structured_data: dict[str, Any],
+    homepage_url: str | None,
+) -> ExtractedField[list[dict[str, Any]]]:
+    """Extract company products, offerings, and commercial services without fabrication."""
+    products: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    # 1. Structured data (Product, Service, Offer, ItemList)
+    if structured_data:
+        entities = _walk_structured_data(
+            structured_data.get("json-ld", []),
+            {"Product", "Service", "Offer", "SoftwareApplication"},
+        )
+        for item in entities:
+            name = item.get("name")
+            desc = item.get("description")
+            category = item.get("category") or item.get("@type")
+            if isinstance(name, str) and len(name.strip()) > 1:
+                clean_name = name.strip()
+                clean_desc = desc.strip()[:300] if isinstance(desc, str) else None
+                key = clean_name.lower()
+                if key not in seen:
+                    seen.add(key)
+                    products.append({
+                        "name": clean_name,
+                        "description": clean_desc,
+                        "category": str(category) if category else None,
+                        "source": "website_jsonld",
+                    })
+
+    # 2. First-party pages (/tjenester, /produkter, /services, /losninger)
+    if website_value:
+        pages = website_value.get("pages", [])
+        for page in pages:
+            p_url = str(page.get("url") or "")
+            path = urllib.parse.urlparse(p_url).path.lower()
+            if any(term in path for term in ("tjenester", "produkter", "services", "products", "losninger", "solutions")):
+                page_title = str(page.get("title") or "").strip()
+                page_text = str(page.get("main_text_excerpt") or "").strip()
+                if page_title and page_title.lower() not in ("tjenester", "produkter", "services", "products", "våre tjenester", "hjem"):
+                    key = page_title.lower()
+                    if key not in seen and len(page_title) < 100:
+                        seen.add(key)
+                        products.append({
+                            "name": page_title,
+                            "description": page_text[:200] if page_text else None,
+                            "category": "service" if "tjenest" in path else "product",
+                            "source": "website_product_page",
+                        })
+                # Check for bulleted lists or subheadings in page text
+                lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+                for line in lines:
+                    if any(line.startswith(b) for b in ("- ", "* ", "• ")) and 4 < len(line) < 100:
+                        item_name = line.lstrip("-*• ").strip()
+                        key = item_name.lower()
+                        if key not in seen:
+                            seen.add(key)
+                            products.append({
+                                "name": item_name,
+                                "description": None,
+                                "category": "offering",
+                                "source": "website_offering_list",
+                            })
+                            if len(products) >= 15:
+                                break
+
+    # 3. Fallback to statutory purpose/activity if specific products/services are enumerated
+    purpose = profile.get("purpose")
+    if not products and purpose:
+        purpose_str = str(purpose).strip()
+        if any(prefix in purpose_str.lower() for prefix in ("salg av", "utvikling", "drift av", "tjenester innen", "produksjon av", "handel med")):
+            products.append({
+                "name": purpose_str[:120],
+                "description": purpose_str[:300],
+                "category": "statutory_purpose",
+                "source": "official_registry_purpose",
+            })
+
+    if products:
+        return ExtractedField(
+            field_name="products_and_services",
+            value=products[:15],
+            status=FieldStatus.FOUND,
+            source_url=homepage_url or "https://data.brreg.no/enhetsregisteret/api/enheter",
+            source_type="website_and_registry" if website_value else "official_registry",
+            evidence_span=f"Extracted {len(products)} product(s)/service(s)",
+            confidence=0.9 if website_value else 0.8,
+        )
+
+    if not website_value and not purpose:
+        return ExtractedField(
+            field_name="products_and_services",
+            value=[],
+            status=FieldStatus.UNAVAILABLE,
+            source_type="company_website",
+            note="Products and services information source is unavailable",
+        )
+
+    return ExtractedField(
+        field_name="products_and_services",
+        value=[],
+        status=FieldStatus.NOT_FOUND,
+        source_url=homepage_url,
+        source_type="company_website",
+        note="Inspected website but no explicit product or service catalog identified",
+    )
+
+
+def extract_customers_and_markets(
+    profile: dict[str, Any],
+    website_value: dict[str, Any] | None,
+    structured_data: dict[str, Any],
+    homepage_url: str | None,
+) -> ExtractedField[dict[str, Any]]:
+    """Extract target audience, geographic scope, and customer references without speculation."""
+    target_audience = None
+    geographic_scope = None
+    references: list[str] = []
+    seen_refs: set[str] = set()
+
+    # 1. Structured data (areaServed, audience)
+    if structured_data:
+        entities = _walk_structured_data(
+            structured_data.get("json-ld", []),
+            {"Organization", "Corporation", "LocalBusiness"},
+        )
+        for ent in entities:
+            area = ent.get("areaServed")
+            if isinstance(area, str) and area.strip():
+                geographic_scope = area.strip()
+            elif isinstance(area, dict) and area.get("name"):
+                geographic_scope = str(area.get("name")).strip()
+            elif isinstance(area, list):
+                names = [x.get("name") if isinstance(x, dict) else str(x) for x in area if x]
+                if names:
+                    geographic_scope = ", ".join(names[:5])
+
+            aud = ent.get("audience")
+            if isinstance(aud, str) and aud.strip():
+                target_audience = aud.strip()
+            elif isinstance(aud, dict) and aud.get("audienceType"):
+                target_audience = str(aud.get("audienceType")).strip()
+
+    # 2. Website reference pages (/referanser, /kunder, /cases, /prosjekter) & text analysis
+    if website_value:
+        combined_text = " ".join([
+            str(website_value.get("title") or ""),
+            str(website_value.get("description") or ""),
+            str(website_value.get("main_text_excerpt") or ""),
+            *[str(p.get("main_text_excerpt") or "") for p in website_value.get("pages", [])],
+        ])
+
+        # Geographic scope detection
+        if not geographic_scope:
+            if re.search(r"\b(?:globalt|worldwide|internasjonalt|international|europa|europe)\b", combined_text, re.IGNORECASE):
+                geographic_scope = "Internasjonalt / Globalt"
+            elif re.search(r"\b(?:norden|nordic|skandinavia|scandinavia)\b", combined_text, re.IGNORECASE):
+                geographic_scope = "Norden / Skandinavia"
+            elif re.search(r"\b(?:hele\s+norge|nasjonalt|over\s+hele\s+landet)\b", combined_text, re.IGNORECASE):
+                geographic_scope = "Norge (nasjonalt)"
+            elif profile.get("municipality"):
+                geographic_scope = f"{profile.get('municipality')}, Norge (lokalt/regionalt)"
+
+        # Target audience detection (B2B, B2C, public sector)
+        if not target_audience:
+            b2b = bool(re.search(r"\b(?:b2b|bedriftsmarkedet|offentlig\s+sektor|næringslivet|for\s+bedrifter)\b", combined_text, re.IGNORECASE))
+            b2c = bool(re.search(r"\b(?:b2c|privatmarkedet|forbruker|forbrukerkunder|privatkunder)\b", combined_text, re.IGNORECASE))
+            if b2b and b2c:
+                target_audience = "B2B & B2C (Næringsliv og privatpersoner)"
+            elif b2b:
+                target_audience = "B2B (Bedrifts- og organisasjonsmarkedet)"
+            elif b2c:
+                target_audience = "B2C (Forbrukermarkedet)"
+
+        # Reference customers/cases from pages
+        for page in website_value.get("pages", []):
+            p_url = str(page.get("url") or "")
+            path = urllib.parse.urlparse(p_url).path.lower()
+            if any(term in path for term in ("referanser", "kunder", "cases", "clients", "portfolio", "prosjekter")):
+                p_text = str(page.get("main_text_excerpt") or "")
+                for line in p_text.splitlines():
+                    clean = line.strip()
+                    if any(clean.startswith(b) for b in ("- ", "* ", "• ")) and 3 < len(clean) < 80:
+                        ref_name = clean.lstrip("-*• ").strip()
+                        key = ref_name.lower()
+                        if key not in seen_refs:
+                            seen_refs.add(key)
+                            references.append(ref_name)
+                            if len(references) >= 10:
+                                break
+
+    # 3. Registry fallback for geographic scope
+    if not geographic_scope and profile.get("municipality"):
+        geographic_scope = f"{profile.get('municipality')}, Norge"
+
+    has_data = bool(target_audience or geographic_scope or references)
+    if has_data:
+        val = {
+            "target_audience": target_audience,
+            "geographic_scope": geographic_scope,
+            "references": references[:10],
+        }
+        return ExtractedField(
+            field_name="customers_and_markets",
+            value=val,
+            status=FieldStatus.FOUND,
+            source_url=homepage_url or "https://data.brreg.no/enhetsregisteret/api/enheter",
+            source_type="website_and_registry" if website_value else "official_registry",
+            evidence_span=f"Scope: {geographic_scope}; Audience: {target_audience}; References: {len(references)}",
+            confidence=0.85,
+        )
+
+    if not website_value:
+        return ExtractedField(
+            field_name="customers_and_markets",
+            value=None,
+            status=FieldStatus.UNAVAILABLE,
+            source_type="company_website",
+            note="Customer and market information source is unavailable",
+        )
+
+    return ExtractedField(
+        field_name="customers_and_markets",
+        value=None,
+        status=FieldStatus.NOT_FOUND,
+        source_url=homepage_url,
+        source_type="company_website",
+        note="Inspected website but no explicit target market or reference customers found",
+    )
+
+
+def extract_certifications(
+    profile: dict[str, Any],
+    website_value: dict[str, Any] | None,
+    homepage_url: str | None,
+    *,
+    html: str | None = None,
+) -> ExtractedField[list[str]]:
+    """Extract verified third-party quality, environmental, and industry certifications."""
+    if not website_value and not html:
+        return ExtractedField(
+            field_name="certifications",
+            value=[],
+            status=FieldStatus.UNAVAILABLE,
+            source_type="company_website",
+            note="Website unavailable for certification verification",
+        )
+
+    text_parts = [
+        str((website_value or {}).get("title") or ""),
+        str((website_value or {}).get("description") or ""),
+        str((website_value or {}).get("main_text_excerpt") or ""),
+        *[str(p.get("main_text_excerpt") or "") for p in (website_value or {}).get("pages", [])],
+    ]
+    if html:
+        text_parts.append(html)
+    combined_text = " ".join(text_parts)
+
+    found_certs: list[str] = []
+    seen: set[str] = set()
+
+    for pattern, label in CERTIFICATION_PATTERNS:
+        if pattern.search(combined_text):
+            if label not in seen:
+                seen.add(label)
+                found_certs.append(label)
+
+    if found_certs:
+        return ExtractedField(
+            field_name="certifications",
+            value=found_certs,
+            status=FieldStatus.FOUND,
+            source_url=homepage_url,
+            source_type="website_certifications",
+            evidence_span=f"Verified certifications: {', '.join(found_certs)}",
+            confidence=0.95,
+        )
+
+    return ExtractedField(
+        field_name="certifications",
+        value=[],
+        status=FieldStatus.NOT_FOUND,
+        source_url=homepage_url,
+        source_type="company_website",
+        note="Inspected website but no standard certifications identified",
+    )
+
+
+def extract_corporate_governance(
+    profile: dict[str, Any],
+    homepage_url: str | None = None,
+) -> ExtractedField[dict[str, Any]]:
+    """Extract statutory corporate governance, registration timeline, capital, and group hierarchy."""
+    reg_date = profile.get("registration_date")
+    founding_date = profile.get("founding_date")
+    vat_reg = profile.get("vat_registered")
+    share_cap = profile.get("share_capital")
+    is_in_group = profile.get("is_in_group")
+    parent_org = profile.get("parent_organisation")
+    org_form = profile.get("organisation_form") or profile.get("orgform")
+
+    # Board and auditor from roles if available in profile evidence
+    reg_roles = ((profile.get("evidence") or {}).get("roles", {}).get("value") or {}).get("roles") or []
+    board_members: list[dict[str, Any]] = []
+    auditor: str | None = None
+
+    for r in reg_roles:
+        if r.get("inactive"):
+            continue
+        name = r.get("name")
+        role = r.get("role") or r.get("group") or ""
+        if not name:
+            continue
+        lower_role = role.lower()
+        if "revisor" in lower_role:
+            auditor = name
+        elif any(k in lower_role for k in ("styre", "board", "chair")):
+            board_members.append({"name": name, "role": role})
+
+    has_governance = any(x is not None for x in (reg_date, founding_date, vat_reg, share_cap, is_in_group, parent_org, org_form)) or bool(board_members) or bool(auditor)
+
+    if has_governance:
+        gov_data = {
+            "registration_date": str(reg_date) if reg_date else None,
+            "founding_date": str(founding_date) if founding_date else None,
+            "organisation_form": org_form,
+            "vat_registered": bool(vat_reg) if vat_reg is not None else None,
+            "share_capital": share_cap,
+            "currency": "NOK" if share_cap is not None else None,
+            "is_in_group": bool(is_in_group) if is_in_group is not None else None,
+            "parent_organisation": parent_org,
+            "board_members": board_members[:10],
+            "auditor": auditor,
+        }
+        return ExtractedField(
+            field_name="corporate_governance",
+            value=gov_data,
+            status=FieldStatus.FOUND,
+            source_url="https://data.brreg.no/enhetsregisteret/api/enheter",
+            source_type="official_registry",
+            evidence_span=f"OrgForm: {org_form}; RegDate: {reg_date}; ShareCapital: {share_cap} NOK; Group: {is_in_group}",
+            confidence=1.0,
+        )
+
+    return ExtractedField(
+        field_name="corporate_governance",
+        value=None,
+        status=FieldStatus.UNAVAILABLE,
+        source_type="official_registry",
+        note="Statutory governance records unavailable",
+    )
+
+
+# ============================================================================
 # 4. MAIN EXTRACTION PIPELINE
 # ============================================================================
 
@@ -959,6 +1426,10 @@ def extract_company_profile(
     employees_field = extract_employees(profile, website_value, structured_data, homepage_url)
     careers_field = extract_careers(profile, website_value, homepage_url)
     news_field = extract_news(profile, website_value, homepage_url)
+    products_field = extract_products_and_services(profile, website_value, structured_data, homepage_url)
+    customers_field = extract_customers_and_markets(profile, website_value, structured_data, homepage_url)
+    certifications_field = extract_certifications(profile, website_value, homepage_url, html=html)
+    governance_field = extract_corporate_governance(profile, homepage_url)
 
     structured_summary = {
         "json_ld_entities_count": len(structured_data.get("json-ld", [])),
@@ -979,4 +1450,8 @@ def extract_company_profile(
         news=news_field,
         structured_data_summary=structured_summary,
         overall_status="complete",
+        products_and_services=products_field,
+        customers_and_markets=customers_field,
+        certifications=certifications_field,
+        corporate_governance=governance_field,
     )

@@ -78,14 +78,18 @@ from norway_company_agent.profile_extraction import (  # noqa: E402
     ExtractedField,
     FieldStatus,
     extract_careers,
+    extract_certifications,
     extract_company_profile,
     extract_contact,
+    extract_corporate_governance,
+    extract_customers_and_markets,
     extract_description,
     extract_employees,
     extract_industry,
     extract_leadership,
     extract_locations,
     extract_news,
+    extract_products_and_services,
 )
 from norway_company_agent.financial_intelligence import (  # noqa: E402
     CompanyFinancialProfile,
@@ -253,6 +257,30 @@ from norway_company_agent.logging_utils import (  # noqa: E402
 )
 from norway_company_agent.observability import (  # noqa: E402
     ProductionMetricsCollector,
+)
+from norway_company_agent.coverage import (  # noqa: E402
+    ALL_29_CATEGORIES,
+    CATEGORY_SOURCE_STRATEGY,
+    CategoryTier,
+    ConflictRecord,
+    CoverageCategory,
+    CoverageEvaluationResult,
+    CoverageFact,
+    CoverageFieldStatus,
+    SourcePriority,
+    TIER_MAPPING,
+    UnifiedCompanyProfile,
+    build_unified_company_profile,
+    evaluate_batch_coverage,
+    evaluate_profile_coverage,
+    normalize_address,
+    normalize_date,
+    normalize_email,
+    normalize_financial_amount,
+    normalize_org_number,
+    normalize_phone_number,
+    normalize_url,
+    resolve_field_conflict,
 )
 from norway_company_agent.website import _extraction_state, _priority_links, _social_links, assert_public_url, normalize_homepage, normalize_social_url, structured_social_links  # noqa: E402
 from norway_company_agent.batch import evidence_terminal_state, profile_complete_for_modules, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
@@ -5386,8 +5414,714 @@ class Stage11ProductionHardeningTests(unittest.TestCase):
         self.assertEqual(len(failed_res.changes), 0)  # Zero false removals!
 
 
+# ============================================================================
+# STAGE 14: COVERAGE EXPANSION TESTS
+# ============================================================================
+
+class Stage14CoverageExpansionTests(unittest.TestCase):
+    """Test suite for Stage 14: Coverage Expansion.
+
+    Verifies:
+    1. Exact 29 categories completeness, tier mapping, and fallback strategy
+    2. Robust value normalization across currencies, phones, URLs, dates, and addresses
+    3. The 12 representative Norwegian company archetypes
+    4. Deterministic conflict resolution and source precedence
+    5. Output contract envelope compliance
+    6. Batch coverage evaluation metrics
+    7. High-value extractors (products, markets, certifications, corporate governance)
+    """
+
+    def test_all_29_categories_completeness_and_tiers(self):
+        """Verify that all 29 categories exist, have tiers, and have configured fallback strategies."""
+        self.assertEqual(len(ALL_29_CATEGORIES), 29)
+        for cat in ALL_29_CATEGORIES:
+            self.assertIn(cat, TIER_MAPPING, f"Category {cat} must have a tier assigned")
+            self.assertIn(cat, CATEGORY_SOURCE_STRATEGY, f"Category {cat} must have a fallback strategy")
+            strat = CATEGORY_SOURCE_STRATEGY[cat]
+            self.assertIn("primary", strat)
+
+        # Verify core tier counts
+        tier_1 = [cat for cat, t in TIER_MAPPING.items() if t == CategoryTier.TIER_1_CORE]
+        tier_2 = [cat for cat, t in TIER_MAPPING.items() if t == CategoryTier.TIER_2_COMMERCIAL]
+        tier_3 = [cat for cat, t in TIER_MAPPING.items() if t == CategoryTier.TIER_3_RESTRICTED]
+
+        self.assertEqual(len(tier_1), 18)  # Core statutory + financial anchor
+        self.assertEqual(len(tier_2), 8)   # Commercial & operational
+        self.assertEqual(len(tier_3), 3)   # Technology, Partnerships, Ownership info
+
+    def test_normalization_financial_amounts(self):
+        """Verify normalisation of various Norwegian financial text and numeric formats."""
+        # Clean integer
+        val, curr = normalize_financial_amount(12500000)
+        self.assertEqual(val, 12500000)
+        self.assertEqual(curr, "NOK")
+
+        # Norwegian space-separated string with NOK prefix
+        val, curr = normalize_financial_amount("NOK 12 500 000")
+        self.assertEqual(val, 12500000)
+        self.assertEqual(curr, "NOK")
+
+        # Norwegian text with million suffix
+        val, curr = normalize_financial_amount("12.5 million NOK")
+        self.assertEqual(val, 12500000.0)
+        self.assertEqual(curr, "NOK")
+
+        # Norwegian text with mill suffix and comma decimal
+        val, curr = normalize_financial_amount("12,5 mill. NOK")
+        self.assertEqual(val, 12500000.0)
+        self.assertEqual(curr, "NOK")
+
+        # Standard comma-separated thousands
+        val, curr = normalize_financial_amount("12,500,000 NOK")
+        self.assertEqual(val, 12500000)
+        self.assertEqual(curr, "NOK")
+
+        # EUR currency detection with European comma decimal
+        val, curr = normalize_financial_amount("250 000,50 EUR")
+        self.assertEqual(val, 250000.5)
+        self.assertEqual(curr, "EUR")
+
+        # None input
+        val, curr = normalize_financial_amount(None)
+        self.assertIsNone(val)
+        self.assertEqual(curr, "NOK")
+
+    def test_normalization_phone_numbers(self):
+        """Verify normalisation of Norwegian and international phone numbers."""
+        self.assertEqual(normalize_phone_number("22334455"), "+47 22 33 44 55")
+        self.assertEqual(normalize_phone_number("+4722334455"), "+47 22 33 44 55")
+        self.assertEqual(normalize_phone_number("+47 22 33 44 55"), "+47 22 33 44 55")
+        self.assertEqual(normalize_phone_number("+47 (0) 22 33 44 55"), "+47 22 33 44 55")
+        self.assertEqual(normalize_phone_number("+44 20 7946 0991"), "+442079460991")
+        self.assertIsNone(normalize_phone_number(None))
+        self.assertIsNone(normalize_phone_number(""))
+
+    def test_normalization_urls_and_emails(self):
+        """Verify URL and email address normalisation."""
+        self.assertEqual(normalize_url("example.no"), "https://example.no")
+        self.assertEqual(normalize_url("http://example.no:80/about/"), "http://example.no/about")
+        self.assertEqual(normalize_url("https://example.no:443/"), "https://example.no")
+        self.assertIsNone(normalize_url(None))
+        self.assertIsNone(normalize_url(""))
+
+        self.assertEqual(normalize_email(" Post@Example.NO "), "post@example.no")
+        self.assertEqual(normalize_email("kontakt@firma.as"), "kontakt@firma.as")
+        self.assertIsNone(normalize_email("invalid-email-format"))
+        self.assertIsNone(normalize_email(None))
+
+    def test_normalization_dates_and_addresses(self):
+        """Verify date and address normalisation."""
+        self.assertEqual(normalize_date("2024-05-15"), "2024-05-15")
+        self.assertEqual(normalize_date("15.05.2024"), "2024-05-15")
+        self.assertEqual(normalize_date("15-05-2024"), "2024-05-15")
+        self.assertEqual(normalize_date("2024-05-15T08:30:00Z"), "2024-05-15")
+        self.assertIsNone(normalize_date(None))
+
+        # Address string with postal code and city
+        addr_str = normalize_address("Storgata 1, 0155 Oslo")
+        self.assertEqual(addr_str["street"], "Storgata 1")
+        self.assertEqual(addr_str["postal_code"], "0155")
+        self.assertEqual(addr_str["city"], "Oslo")
+
+        # Address dict
+        addr_dict = normalize_address({
+            "adresse": ["Postboks 123", "Sentrum"],
+            "postnummer": "5001",
+            "poststed": "Bergen",
+        })
+        self.assertEqual(addr_dict["street"], "Postboks 123, Sentrum")
+        self.assertEqual(addr_dict["postal_code"], "5001")
+        self.assertEqual(addr_dict["city"], "Bergen")
+
+    def test_archetype_1_full_information_company(self):
+        """Archetype 1: Full-information company with registry, website, financials, products, certs."""
+        profile = {
+            "name": "Nordic Solutions AS",
+            "organisation_number": "912345678",
+            "organisation_form": "AS",
+            "registration_date": "2015-03-01",
+            "is_bankrupt": False,
+            "is_under_liquidation": False,
+            "industry_code": "62.010",
+            "industry_label": "Programmeringstjenester",
+            "business_address": "Dronning Eufemias gate 10, 0191 Oslo",
+            "municipality": "Oslo",
+            "phone": "+47 22 00 11 22",
+            "email": "kontakt@nordicsolutions.no",
+            "employees": 45,
+            "share_capital": 1000000,
+            "is_in_group": True,
+            "parent_organisation": "999888777",
+            "purpose": "Utvikling og salg av programvareløsninger for enterprise-markedet.",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://nordicsolutions.no",
+                    "value": {
+                        "final_url": "https://nordicsolutions.no",
+                        "description": "Ledende leverandør av skybaserte forretningssystemer.",
+                        "pages": [
+                            {"url": "https://nordicsolutions.no/tjenester", "title": "Systemutvikling", "main_text_excerpt": "Vi leverer skreddersøm og skyløsninger."},
+                            {"url": "https://nordicsolutions.no/om-oss", "title": "Om oss", "main_text_excerpt": "Nordic Solutions AS er Miljøfyrtårn-sertifisert og ISO 9001-sertifisert."},
+                        ],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        stmt = FinancialStatement(
+            record_id="2024-stmt",
+            account_type="SELSKAP",
+            period=FinancialReportingPeriod(start_date="2024-01-01", end_date="2024-12-31", year=2024, months=12),
+            currency="NOK",
+            revenue=ExtractedField(field_name="revenue", value=45000000, status=FieldStatus.FOUND, confidence=1.0),
+            operating_profit=ExtractedField(field_name="operating_profit", value=5000000, status=FieldStatus.FOUND, confidence=1.0),
+            profit_before_tax=ExtractedField(field_name="profit_before_tax", value=4800000, status=FieldStatus.FOUND, confidence=1.0),
+            net_profit=ExtractedField(field_name="net_profit", value=3800000, status=FieldStatus.FOUND, confidence=1.0),
+            total_assets=ExtractedField(field_name="total_assets", value=22000000, status=FieldStatus.FOUND, confidence=1.0),
+            total_equity=ExtractedField(field_name="total_equity", value=14000000, status=FieldStatus.FOUND, confidence=1.0),
+            total_debt=ExtractedField(field_name="total_debt", value=8000000, status=FieldStatus.FOUND, confidence=1.0),
+            source_url="https://data.brreg.no/regnskapsregisteret/regnskap/2024-stmt",
+            source_type="official_regnskapsregisteret",
+        )
+        fin_profile = CompanyFinancialProfile(
+            organisation_number="912345678",
+            company_name="Nordic Solutions AS",
+            latest_accounts=stmt,
+        )
+
+        unified = build_unified_company_profile(profile, extracted_profile=extracted, financial_profile=fin_profile)
+        metrics = evaluate_profile_coverage(unified)
+
+        # High coverage expected for full-information company
+        self.assertGreater(metrics.coverage_rate, 0.75)
+        self.assertEqual(metrics.evidence_coverage_rate, 1.0)
+        self.assertGreater(metrics.authoritative_coverage_rate, 0.40)
+        self.assertEqual(unified.get_fact(CoverageCategory.LEGAL_NAME).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.REVENUE).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.CERTIFICATIONS).status, CoverageFieldStatus.AVAILABLE)
+        self.assertIn("Miljøfyrtårn (Eco-Lighthouse)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertIn("ISO 9001 (Quality Management)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+
+    def test_archetype_2_minimal_website_company(self):
+        """Archetype 2: Company with minimal 1-page website without JSON-LD or catalog."""
+        profile = {
+            "name": "Lille Frisør AS",
+            "organisation_number": "922333444",
+            "organisation_form": "AS",
+            "registration_date": "2020-01-10",
+            "business_address": "Kirkegata 2, 4610 Kristiansand",
+            "municipality": "Kristiansand",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://lillefrisor.no",
+                    "value": {
+                        "final_url": "https://lillefrisor.no",
+                        "description": "Velkommen til Lille Frisør i Kristiansand sentrum.",
+                        "pages": [],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+        metrics = evaluate_profile_coverage(unified)
+
+        self.assertGreater(metrics.coverage_rate, 0.35)
+        # Description and website available
+        self.assertEqual(unified.get_fact(CoverageCategory.WEBSITE).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.DESCRIPTION).status, CoverageFieldStatus.AVAILABLE)
+        # Products and certifications are NOT_FOUND, not hallucinated
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).status, CoverageFieldStatus.NOT_FOUND)
+        self.assertEqual(unified.get_fact(CoverageCategory.CERTIFICATIONS).status, CoverageFieldStatus.NOT_FOUND)
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).value, [])
+
+    def test_archetype_3_norwegian_only_website(self):
+        """Archetype 3: Company with Norwegian-only terminology on its website."""
+        profile = {
+            "name": "Norsk Trevarefabrikk AS",
+            "organisation_number": "933444555",
+            "organisation_form": "AS",
+            "business_address": "Fabrikkveien 1, 2380 Brumunddal",
+            "municipality": "Ringsaker",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://norsktrevare.no",
+                    "value": {
+                        "final_url": "https://norsktrevare.no",
+                        "title": "Norsk Trevarefabrikk - Kvalitetsmøbler",
+                        "description": "Vi produserer skreddersydde tremøbler og dører.",
+                        "pages": [
+                            {"url": "https://norsktrevare.no/tjenester", "title": "Våre tjenester", "main_text_excerpt": "• Produksjon av heltrebord\n• Spesialtilpassede dører\n• Restaurering"},
+                            {"url": "https://norsktrevare.no/kontakt", "title": "Kontakt oss", "main_text_excerpt": "Ring oss på 62 34 56 78 eller send e-post til post@norsktrevare.no."},
+                            {"url": "https://norsktrevare.no/om-oss", "title": "Om oss", "main_text_excerpt": "Ola Nordmann, Daglig leder. Bedriften er Svanemerket og Miljøfyrtårn."},
+                        ],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(len(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).value), 3)
+        self.assertEqual(unified.get_fact(CoverageCategory.CERTIFICATIONS).status, CoverageFieldStatus.AVAILABLE)
+        self.assertIn("Miljøfyrtårn (Eco-Lighthouse)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertIn("Svanemerket (Nordic Swan Ecolabel)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertEqual(unified.get_fact(CoverageCategory.LEADERSHIP).status, CoverageFieldStatus.AVAILABLE)
+
+    def test_archetype_4_english_only_website(self):
+        """Archetype 4: Company with English-only corporate website."""
+        profile = {
+            "name": "Global Maritime Tech AS",
+            "organisation_number": "944555666",
+            "organisation_form": "AS",
+            "business_address": "Havnegata 12, 4005 Stavanger",
+            "municipality": "Stavanger",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://globalmaritimetech.com",
+                    "value": {
+                        "final_url": "https://globalmaritimetech.com",
+                        "title": "Global Maritime Tech - Offshore Software",
+                        "description": "Provider of mission-critical software for offshore energy operations.",
+                        "pages": [
+                            {"url": "https://globalmaritimetech.com/services", "title": "Our Services", "main_text_excerpt": "• Fleet Monitoring\n• Subsea Robotics Control\n• Energy Optimization"},
+                            {"url": "https://globalmaritimetech.com/contact", "title": "Contact", "main_text_excerpt": "Reach us at contact@globalmaritimetech.com or phone +47 51 00 20 30."},
+                            {"url": "https://globalmaritimetech.com/about", "title": "About us", "main_text_excerpt": "John Smith - Chief Executive Officer. Certified ISO 27001 and ISO 9001."},
+                        ],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.CERTIFICATIONS).status, CoverageFieldStatus.AVAILABLE)
+        self.assertIn("ISO 27001 (Information Security)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertIn("ISO 9001 (Quality Management)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertEqual(unified.get_fact(CoverageCategory.LEADERSHIP).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.LEADERSHIP).value[0]["name"], "John Smith")
+
+    def test_archetype_5_no_website_registry_fallbacks(self):
+        """Archetype 5: Company with no website at all; relies 100% on BRREG statutory columns."""
+        profile = {
+            "name": "Bergen Rørleggerservice AS",
+            "organisation_number": "955666777",
+            "organisation_form": "AS",
+            "registration_date": "2018-09-12",
+            "is_bankrupt": False,
+            "is_under_liquidation": False,
+            "industry_code": "43.220",
+            "industry_label": "Rørleggerarbeid",
+            "business_address": "Kanalveien 10, 5068 Bergen",
+            "municipality": "Bergen",
+            "phone": "+47 55 99 88 77",
+            "email": "kontakt@bergenror.no",
+            "purpose": "Rørleggerarbeid, installasjon og reparasjon av sanitæranlegg.",
+            "share_capital": 30000,
+            "is_in_group": False,
+            "evidence": {
+                "website": {"status": "not_found", "source_url": None, "value": None},
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+        metrics = evaluate_profile_coverage(unified)
+
+        # Statutory fallback verification:
+        self.assertEqual(unified.get_fact(CoverageCategory.WEBSITE).status, CoverageFieldStatus.NOT_FOUND)
+        # Description falls back to official statutory purpose
+        self.assertEqual(unified.get_fact(CoverageCategory.DESCRIPTION).status, CoverageFieldStatus.AVAILABLE)
+        self.assertIn("Rørleggerarbeid", str(unified.get_fact(CoverageCategory.DESCRIPTION).value))
+        # Contact falls back to statutory address & phone
+        self.assertEqual(unified.get_fact(CoverageCategory.CONTACT_INFORMATION).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.CONTACT_INFORMATION).normalized_value["city"], "Bergen")
+        # Ownership & group fallback
+        self.assertEqual(unified.get_fact(CoverageCategory.OWNERSHIP_INFO).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.OWNERSHIP_INFO).normalized_value, 30000)
+        self.assertEqual(unified.get_fact(CoverageCategory.PARENT_SUBSIDIARY).status, CoverageFieldStatus.AVAILABLE)
+        self.assertFalse(unified.get_fact(CoverageCategory.PARENT_SUBSIDIARY).normalized_value["is_in_group"])
+
+        # Even with zero website, coverage is strong due to authoritative registry fallbacks!
+        self.assertGreater(metrics.coverage_rate, 0.40)
+        self.assertGreater(metrics.authoritative_coverage_rate, 0.70)
+
+    def test_archetype_6_financial_information_present(self):
+        """Archetype 6: Company with official Regnskapsregisteret accounts."""
+        profile = {
+            "name": "Tromsø Logistikk AS",
+            "organisation_number": "966777888",
+            "organisation_form": "AS",
+            "registration_date": "2012-04-01",
+        }
+        stmt = FinancialStatement(
+            record_id="rec-tromso-2024",
+            account_type="SELSKAP",
+            period=FinancialReportingPeriod(start_date="2024-01-01", end_date="2024-12-31", year=2024, months=12),
+            currency="NOK",
+            revenue=ExtractedField(field_name="revenue", value=82000000, status=FieldStatus.FOUND, confidence=1.0),
+            operating_profit=ExtractedField(field_name="operating_profit", value=6500000, status=FieldStatus.FOUND, confidence=1.0),
+            profit_before_tax=ExtractedField(field_name="profit_before_tax", value=6200000, status=FieldStatus.FOUND, confidence=1.0),
+            net_profit=ExtractedField(field_name="net_profit", value=4900000, status=FieldStatus.FOUND, confidence=1.0),
+            total_assets=ExtractedField(field_name="total_assets", value=40000000, status=FieldStatus.FOUND, confidence=1.0),
+            total_equity=ExtractedField(field_name="total_equity", value=22000000, status=FieldStatus.FOUND, confidence=1.0),
+            total_debt=ExtractedField(field_name="total_debt", value=18000000, status=FieldStatus.FOUND, confidence=1.0),
+            source_url="https://data.brreg.no/regnskapsregisteret/regnskap/rec-tromso-2024",
+        )
+        fin_prof = CompanyFinancialProfile(
+            organisation_number="966777888",
+            company_name="Tromsø Logistikk AS",
+            latest_accounts=stmt,
+        )
+
+        unified = build_unified_company_profile(profile, financial_profile=fin_prof)
+
+        rev_fact = unified.get_fact(CoverageCategory.REVENUE)
+        self.assertEqual(rev_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(rev_fact.normalized_value["amount"], 82000000)
+        self.assertEqual(rev_fact.normalized_value["currency"], "NOK")
+
+        prof_fact = unified.get_fact(CoverageCategory.PROFIT_LOSS)
+        self.assertEqual(prof_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(prof_fact.normalized_value["amount"], 4900000)
+
+        year_fact = unified.get_fact(CoverageCategory.FINANCIAL_YEAR)
+        self.assertEqual(year_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(year_fact.normalized_value, 2024)
+
+    def test_archetype_7_financial_information_exempt(self):
+        """Archetype 7: Sole proprietorship (ENK) exempt from annual accounts filing."""
+        profile = {
+            "name": "Kari Hansen Enkeltpersonforetak",
+            "organisation_number": "977888999",
+            "organisation_form": "ENK",
+            "registration_date": "2019-06-15",
+        }
+        fin_prof_exempt = CompanyFinancialProfile(
+            organisation_number="977888999",
+            company_name="Kari Hansen Enkeltpersonforetak",
+            accounting_obligation={"required": False, "reason": "ENK below statutory accounting thresholds"},
+        )
+
+        unified = build_unified_company_profile(profile, financial_profile=fin_prof_exempt)
+
+        # Financial fields must be explicitly UNAVAILABLE, not fabricated zeroes!
+        rev_fact = unified.get_fact(CoverageCategory.REVENUE)
+        self.assertEqual(rev_fact.status, CoverageFieldStatus.UNAVAILABLE)
+        self.assertIsNone(rev_fact.value)
+        self.assertIn("exempt", rev_fact.note.lower())
+
+        profit_fact = unified.get_fact(CoverageCategory.PROFIT_LOSS)
+        self.assertEqual(profit_fact.status, CoverageFieldStatus.UNAVAILABLE)
+        self.assertIsNone(profit_fact.value)
+
+    def test_archetype_8_leadership_present(self):
+        """Archetype 8: Company with official BRREG roles present."""
+        profile = {
+            "name": "Viken Bygg AS",
+            "organisation_number": "988999000",
+            "evidence": {
+                "roles": {
+                    "status": "available",
+                    "value": {
+                        "roles": [
+                            {"name": "Lars Viken", "role": "Daglig leder", "inactive": False},
+                            {"name": "Astrid Viken", "role": "Styrets leder", "inactive": False},
+                            {"name": "Revisjon AS", "role": "Revisor", "inactive": False},
+                        ],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        lead_fact = unified.get_fact(CoverageCategory.LEADERSHIP)
+        self.assertEqual(lead_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(len(lead_fact.value), 2)  # CEO and Chair
+        names = [r["name"] for r in lead_fact.value]
+        self.assertIn("Lars Viken", names)
+        self.assertIn("Astrid Viken", names)
+
+    def test_archetype_9_leadership_absent(self):
+        """Archetype 9: Company without registered roles."""
+        profile = {
+            "name": "Tom Foretak AS",
+            "organisation_number": "999000111",
+            "evidence": {
+                "roles": {"status": "available", "value": {"roles": []}},
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        lead_fact = unified.get_fact(CoverageCategory.LEADERSHIP)
+        self.assertEqual(lead_fact.status, CoverageFieldStatus.NOT_FOUND)
+        self.assertEqual(lead_fact.value, [])
+
+    def test_archetype_10_conflicting_sources_and_address_divergence(self):
+        """Archetype 10: Divergence between registered legal headquarters and website operational office."""
+        profile = {
+            "name": "Vestland Consulting AS",
+            "organisation_number": "911222333",
+            "business_address": "Strandgaten 10, 5004 Bergen",
+            "municipality": "Bergen",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://vestlandconsulting.no",
+                    "value": {
+                        "final_url": "https://vestlandconsulting.no",
+                        "main_text_excerpt": "Besøk vårt hovedkontor i Storgata 5, 0155 Oslo. Telefon 22 11 00 99.",
+                        "pages": [],
+                    },
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        # Conflict must be captured transparently
+        self.assertGreater(len(unified.conflicts), 0)
+        conf = unified.conflicts[0]
+        self.assertEqual(conf.category, "address")
+        self.assertIn("Bergen", conf.chosen_value)
+        self.assertIn("Oslo", conf.conflicting_value)
+
+        # Contact fact retains address divergence details
+        c_fact = unified.get_fact(CoverageCategory.CONTACT_INFORMATION)
+        self.assertIn("address_divergence", c_fact.normalized_value)
+
+    def test_archetype_11_inaccessible_failed_source(self):
+        """Archetype 11: Inaccessible or failed upstream source does not crash or corrupt profile."""
+        profile = {
+            "name": "Offline Solutions AS",
+            "organisation_number": "922333111",
+            "registration_date": "2021-01-01",
+            "evidence": {
+                "website": {"status": "source_error", "source_url": "https://offlinesolutions.no", "error": "Connection timed out"},
+            },
+        }
+
+        extracted = extract_company_profile(profile)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        # Core identity intact
+        self.assertEqual(unified.get_fact(CoverageCategory.LEGAL_NAME).status, CoverageFieldStatus.AVAILABLE)
+        # Website marked unavailable due to upstream source error
+        self.assertEqual(unified.get_fact(CoverageCategory.WEBSITE).status, CoverageFieldStatus.UNAVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).status, CoverageFieldStatus.UNAVAILABLE)
+
+    def test_archetype_12_unusual_complex_website_structure(self):
+        """Archetype 12: Website with complex nested JSON-LD graph and deep service hierarchy."""
+        complex_html = """
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <title>Industrial Automation AS</title>
+            <script type="application/ld+json">
+            {
+                "@context": "https://schema.org",
+                "@graph": [
+                    {
+                        "@type": "Organization",
+                        "name": "Industrial Automation AS",
+                        "description": "Custom robotics and programmable logic controllers.",
+                        "numberOfEmployees": 32,
+                        "areaServed": "Norge og Norden"
+                    },
+                    {
+                        "@type": "Product",
+                        "name": "RoboArm 3000",
+                        "description": "6-axis industrial robot arm."
+                    },
+                    {
+                        "@type": "Service",
+                        "name": "PLC Programming",
+                        "description": "Siemens and Allen-Bradley automation engineering."
+                    }
+                ]
+            }
+            </script>
+        </head>
+        <body>
+            <h1>Våre industriroboter</h1>
+            <p>Sertifisert etter ISO 9001 og CE-merket for krevende miljøer.</p>
+        </body>
+        </html>
+        """
+
+        profile = {
+            "name": "Industrial Automation AS",
+            "organisation_number": "933111222",
+            "evidence": {
+                "website": {
+                    "status": "available",
+                    "source_url": "https://industrialautomation.no",
+                    "value": {"final_url": "https://industrialautomation.no", "pages": []},
+                },
+            },
+        }
+
+        extracted = extract_company_profile(profile, html=complex_html)
+        unified = build_unified_company_profile(profile, extracted_profile=extracted)
+
+        # Products from nested graph
+        self.assertEqual(unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).status, CoverageFieldStatus.AVAILABLE)
+        prod_names = [p.get("name") for p in unified.get_fact(CoverageCategory.PRODUCTS_SERVICES).value]
+        self.assertIn("RoboArm 3000", prod_names)
+        self.assertIn("PLC Programming", prod_names)
+
+        # Certifications from HTML body
+        self.assertEqual(unified.get_fact(CoverageCategory.CERTIFICATIONS).status, CoverageFieldStatus.AVAILABLE)
+        self.assertIn("ISO 9001 (Quality Management)", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+        self.assertIn("CE-merket", unified.get_fact(CoverageCategory.CERTIFICATIONS).value)
+
+        # Market scope from graph
+        self.assertEqual(unified.get_fact(CoverageCategory.CUSTOMERS_MARKETS).status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(unified.get_fact(CoverageCategory.CUSTOMERS_MARKETS).value["geographic_scope"], "Norge og Norden")
+
+    def test_conflict_resolution_precedence(self):
+        """Verify deterministic conflict resolution logic across source priority tiers."""
+        # Case 1: Registry (100) vs Website (80) -> Registry wins, conflict recorded
+        val, src, pri, conf, stat = resolve_field_conflict(
+            CoverageCategory.LEGAL_NAME,
+            "Acme Norway AS", "official_registry", SourcePriority.OFFICIAL_REGISTRY,
+            "Acme Nordic", "company_website", SourcePriority.FIRST_PARTY_WEBSITE,
+        )
+        self.assertEqual(val, "Acme Norway AS")
+        self.assertEqual(src, "official_registry")
+        self.assertIsNotNone(conf)
+        self.assertEqual(conf.chosen_value, "Acme Norway AS")
+        self.assertEqual(conf.conflicting_value, "Acme Nordic")
+        self.assertEqual(stat, CoverageFieldStatus.AVAILABLE)
+
+        # Case 2: Equal priority sources with divergent values -> CONFLICTING_SOURCES
+        val, src, pri, conf, stat = resolve_field_conflict(
+            CoverageCategory.DESCRIPTION,
+            "Software developer", "source_alpha", 80,
+            "Hardware manufacturer", "source_beta", 80,
+        )
+        self.assertEqual(stat, CoverageFieldStatus.CONFLICTING_SOURCES)
+        self.assertIsNotNone(conf)
+
+    def test_output_contract_envelope_compliance(self):
+        """Verify compliance with OUTPUT_CONTRACT.md claims, evidence, and operations format."""
+        profile = {
+            "name": "Contract Test AS",
+            "organisation_number": "912345678",
+            "organisation_form": "AS",
+            "registration_date": "2020-01-01",
+        }
+        unified = build_unified_company_profile(
+            profile,
+            operations_metrics={"requests": 3, "runtime_ms": 1420, "cost": 0.0},
+        )
+        envelope = unified.to_contract_envelope(run_id="comp-2026-run-1")
+
+        self.assertEqual(envelope["organisation_number"], "912345678")
+        self.assertIn("run", envelope)
+        self.assertEqual(envelope["run"]["run_id"], "comp-2026-run-1")
+        self.assertEqual(envelope["run"]["terminal_status"], "completed")
+
+        self.assertIn("claims", envelope)
+        self.assertEqual(len(envelope["claims"]), 29)  # Exactly all 29 categories
+        self.assertIn("evidence", envelope)
+        self.assertIn("operations", envelope)
+        self.assertEqual(envelope["operations"]["requests"], 3)
+        self.assertEqual(envelope["operations"]["runtime_ms"], 1420)
+
+        # Check allowed availability states
+        allowed_states = {"available", "not_available", "unavailable", "not_found", "not_applicable", "conflicting_sources", "extraction_failed"}
+        for claim in envelope["claims"]:
+            self.assertIn(claim["availability"], allowed_states)
+
+    def test_batch_coverage_evaluation(self):
+        """Verify batch coverage aggregator over multiple profiles."""
+        p1 = build_unified_company_profile({"name": "Co 1 AS", "organisation_number": "911111111", "registration_date": "2020-01-01"})
+        p2 = build_unified_company_profile({"name": "Co 2 AS", "organisation_number": "922222222", "registration_date": "2021-02-02"})
+
+        batch_metrics = evaluate_batch_coverage([p1, p2])
+        self.assertEqual(batch_metrics["total_profiles"], 2)
+        self.assertGreater(batch_metrics["average_coverage_rate"], 0.15)
+        self.assertEqual(batch_metrics["average_evidence_rate"], 1.0)
+        self.assertIn("category_availability_percentage", batch_metrics)
+        self.assertEqual(batch_metrics["category_availability_percentage"]["legal_name"], 100.0)
+        self.assertEqual(batch_metrics["category_availability_percentage"]["organisation_number"], 100.0)
+
+    def test_stage14_extractors_products_and_services(self):
+        """Verify extract_products_and_services from structured data, HTML pages, and purpose."""
+        profile = {"purpose": "Salg av industrielt verneutstyr og sikkerhetsløsninger."}
+        website_val = {
+            "pages": [
+                {"url": "https://verne.no/produkter", "title": "Vernetøy", "main_text_excerpt": "• Hjelmer\n• Vernebriller\n• Hansker"},
+            ]
+        }
+        res = extract_products_and_services(profile, website_val, {}, "https://verne.no")
+        self.assertEqual(res.status, FieldStatus.FOUND)
+        self.assertGreaterEqual(len(res.value), 3)
+
+    def test_stage14_extractors_certifications(self):
+        """Verify extract_certifications detects Norwegian and ISO quality marks."""
+        website_val = {
+            "title": "Byggmester Hansen",
+            "main_text_excerpt": "Vi er StartBANK-godkjent og har Mesterbedrift-status. Vår bedrift er også ISO 14001 og ISO 45001 sertifisert.",
+            "pages": [],
+        }
+        res = extract_certifications({}, website_val, "https://hansen.no")
+        self.assertEqual(res.status, FieldStatus.FOUND)
+        self.assertIn("StartBANK", res.value)
+        self.assertIn("Mesterbedrift", res.value)
+        self.assertIn("ISO 14001 (Environmental Management)", res.value)
+        self.assertIn("ISO 45001 (Occupational Health & Safety)", res.value)
+
+    def test_stage14_extractors_corporate_governance(self):
+        """Verify extract_corporate_governance packages BRREG statutory columns."""
+        profile = {
+            "organisation_form": "AS",
+            "registration_date": "2016-05-20",
+            "vat_registered": True,
+            "share_capital": 500000,
+            "is_in_group": True,
+            "parent_organisation": "912345678",
+            "evidence": {
+                "roles": {
+                    "value": {
+                        "roles": [
+                            {"name": "Revisjonsselskapet AS", "role": "Revisor", "inactive": False},
+                            {"name": "Kari Styreleder", "role": "Styrets leder", "inactive": False},
+                        ]
+                    }
+                }
+            }
+        }
+        res = extract_corporate_governance(profile)
+        self.assertEqual(res.status, FieldStatus.FOUND)
+        self.assertEqual(res.value["share_capital"], 500000)
+        self.assertEqual(res.value["currency"], "NOK")
+        self.assertTrue(res.value["vat_registered"])
+        self.assertTrue(res.value["is_in_group"])
+        self.assertEqual(res.value["parent_organisation"], "912345678")
+        self.assertEqual(res.value["auditor"], "Revisjonsselskapet AS")
+        self.assertEqual(len(res.value["board_members"]), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
+
 
 
 

@@ -46,14 +46,18 @@ from .profile_extraction import (
     ExtractedField,
     FieldStatus,
     extract_careers,
+    extract_certifications,
     extract_company_profile,
     extract_contact,
+    extract_corporate_governance,
+    extract_customers_and_markets,
     extract_description,
     extract_employees,
     extract_industry,
     extract_leadership,
     extract_locations,
     extract_news,
+    extract_products_and_services,
 )
 from .financial_intelligence import (
     CompanyFinancialProfile,
@@ -220,6 +224,30 @@ from .logging_utils import (
 )
 from .observability import (
     ProductionMetricsCollector,
+)
+from .coverage import (
+    ALL_29_CATEGORIES,
+    CATEGORY_SOURCE_STRATEGY,
+    CategoryTier,
+    ConflictRecord,
+    CoverageCategory,
+    CoverageEvaluationResult,
+    CoverageFact,
+    CoverageFieldStatus,
+    SourcePriority,
+    TIER_MAPPING,
+    UnifiedCompanyProfile,
+    build_unified_company_profile,
+    evaluate_batch_coverage,
+    evaluate_profile_coverage,
+    normalize_address,
+    normalize_date,
+    normalize_email,
+    normalize_financial_amount,
+    normalize_org_number,
+    normalize_phone_number,
+    normalize_url,
+    resolve_field_conflict,
 )
 
 

@@ -26,6 +26,57 @@ def normalize_row(row: dict[str, str]) -> dict[str, Any]:
         employees = int(employees_raw) if employees_raw else None
     except ValueError:
         employees = None
+
+    capital_amt_raw = _first(row, "kapital.belop", "Kapital.beløp")
+    capital_amt = None
+    if capital_amt_raw:
+        try:
+            capital_amt = float(capital_amt_raw.replace(",", ".").replace(" ", ""))
+        except ValueError:
+            capital_amt = None
+
+    capital_shares_raw = _first(row, "kapital.antallAksjer", "Kapital.antall aksjer")
+    capital_shares = None
+    if capital_shares_raw:
+        try:
+            capital_shares = int(capital_shares_raw)
+        except ValueError:
+            capital_shares = None
+
+    bus_street = _first(row, "forretningsadresse.adresse", "Forretningsadresse.adresse")
+    bus_post = _first(row, "forretningsadresse.postnummer", "Forretningsadresse.postnummer")
+    bus_city = _first(row, "forretningsadresse.poststed", "Forretningsadresse.poststed")
+    bus_muni = _first(row, "forretningsadresse.kommune", "Forretningsadresse.kommune")
+    bus_land = _first(row, "forretningsadresse.land", "forretningsadresse.landkode", "Forretningsadresse.land") or "Norge"
+    has_bus_addr = bool(bus_street or bus_post or bus_city or bus_muni)
+    business_address = {
+        "adresse": bus_street or None,
+        "postnummer": bus_post or None,
+        "poststed": bus_city or None,
+        "kommune": bus_muni or None,
+        "land": bus_land if has_bus_addr else None,
+    } if has_bus_addr else None
+
+    post_street = _first(row, "postadresse.adresse", "Postadresse.adresse")
+    post_post = _first(row, "postadresse.postnummer", "Postadresse.postnummer")
+    post_city = _first(row, "postadresse.poststed", "Postadresse.poststed")
+    post_muni = _first(row, "postadresse.kommune", "Postadresse.kommune")
+    post_land = _first(row, "postadresse.land", "postadresse.landkode", "Postadresse.land") or "Norge"
+    has_post_addr = bool(post_street or post_post or post_city or post_muni)
+    postal_address = {
+        "adresse": post_street or None,
+        "postnummer": post_post or None,
+        "poststed": post_city or None,
+        "kommune": post_muni or None,
+        "land": post_land if has_post_addr else None,
+    } if has_post_addr else None
+
+    vat_val = _first(row, "registrertIMvaRegisteret", "Registrert i MVA-registeret")
+    vat_registered = vat_val.lower() == "true" if vat_val else None
+
+    group_val = _first(row, "erIKonsern", "Er i konsern")
+    is_in_group = group_val.lower() == "true" if group_val else None
+
     return {
         "organisation_number": org,
         "name": _first(row, "navn", "Navn"),
@@ -39,6 +90,24 @@ def normalize_row(row: dict[str, str]) -> dict[str, Any]:
         "industry_label": _first(row, "naeringskode1.beskrivelse", "Næringskode1.beskrivelse"),
         "website": _first(row, "hjemmeside", "Hjemmeside"),
         "latest_submitted_accounts": _first(row, "sisteInnsendteAarsregnskap", "Siste innsendte årsregnskap"),
+        "registration_date": _first(row, "registreringsdatoenhetsregisteret", "registreringsdatoEnhetsregisteret", "Registreringsdato i Enhetsregisteret") or None,
+        "founding_date": _first(row, "stiftelsesdato", "Stiftelsesdato") or None,
+        "business_address": business_address,
+        "postal_address": postal_address,
+        "phone": _first(row, "telefon", "mobil", "Telefon", "Mobil") or None,
+        "email": _first(row, "epostadresse", "Epostadresse") or None,
+        "vat_registered": vat_registered,
+        "purpose": _first(row, "vedtektsfestetFormaal", "Vedtektsfestet formål") or None,
+        "activity": _first(row, "aktivitet", "Aktivitet") or None,
+        "share_capital": {
+            "amount": capital_amt,
+            "currency": _first(row, "kapital.valuta", "Kapital.valuta") or "NOK",
+            "shares": capital_shares,
+        } if capital_amt is not None else None,
+        "is_in_group": is_in_group,
+        "parent_organisation": _first(row, "overordnetEnhet", "Overordnet enhet") or None,
+        "secondary_industry_code": _first(row, "naeringskode2.kode", "Næringskode2.kode") or None,
+        "secondary_industry_label": _first(row, "naeringskode2.beskrivelse", "Næringskode2.beskrivelse") or None,
         "raw": row,
     }
 
