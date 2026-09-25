@@ -70,7 +70,7 @@ case "${MODE}" in
             --max-requests 2000 \
             --max-cost 10.0 \
             --max-runtime 2700.0 \
-            --modules registry,accounting_obligation "$@"
+            --modules registry,accounting_obligation,website,financials "$@"
         echo ""
         echo "SUCCESS: 1,000-profile batch complete."
         echo "  - Envelopes: out/envelopes.jsonl"
@@ -113,18 +113,35 @@ case "${MODE}" in
         echo "SUCCESS: Smoke batch complete. Output: out/smoke-envelopes.jsonl"
         ;;
     eval|--eval|evaluation)
-        echo "================================================================================"
-        echo " OrgTrace: Running Competition Evaluation Harness"
-        echo "================================================================================"
-        if [ -f "scripts/run_competition_evaluation.py" ]; then
-            EVAL_ARGS=("$@")
-            if [ ${#EVAL_ARGS[@]} -eq 0 ]; then
-                EVAL_ARGS=(--random 10 --seed 42)
-            fi
-            ${PYTHON_CMD} scripts/run_competition_evaluation.py "${EVAL_ARGS[@]}"
-        else
-            ${PYTHON_CMD} -m norway_company_agent.evaluation
+        if [ -z "${1:-}" ]; then
+            echo "Usage: ./scripts/run_competition.sh eval <path-to-100-company-file.jsonl>"
+            exit 1
         fi
+        echo "================================================================================"
+        echo " OrgTrace: Running 100-Company Evaluation Batch"
+        echo "================================================================================"
+        mkdir -p out
+        BULK_ARGS=()
+        if [ -f "brreg-enheter.csv" ]; then
+            BULK_ARGS=(--bulk brreg-enheter.csv)
+        fi
+        ${PYTHON_CMD} scripts/run_competition_batch.py \
+            --organisations "$1" \
+            "${BULK_ARGS[@]}" \
+            --profiles-output out/profiles.jsonl \
+            --output out/envelopes.jsonl \
+            --report out/run-report.json \
+            --run-id eval-100 \
+            --expected-count 100 \
+            --max-requests 2000 \
+            --max-cost 10.0 \
+            --max-runtime 2700.0 \
+            --modules registry,accounting_obligation,website,financials
+        echo ""
+        echo "SUCCESS: 100-company evaluation batch complete."
+        echo "  - Envelopes: out/envelopes.jsonl"
+        echo "  - Profiles:  out/profiles.jsonl"
+        echo "  - Report:    out/run-report.json"
         ;;
     eval-legacy|--eval-legacy)
         echo "================================================================================"
@@ -163,7 +180,7 @@ case "${MODE}" in
         echo "Modes:"
         echo "  full         Run 1,000-profile competition batch (default)"
         echo "  smoke        Run 10-profile smoke batch"
-        echo "  eval         Run Stage 18 Competition Evaluation Harness (--random 10 --seed 42)"
+        echo "  eval         Run 100-company evaluation batch (<path-to-100-company-file.jsonl>)"
         echo "  eval-legacy  Run Stage 10 Evaluation & Optimization Harness"
         echo "  test         Run test suite (pytest or unittest)"
         echo "  replay       Run deterministic refresh replay demonstration"

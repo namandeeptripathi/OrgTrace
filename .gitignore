@@ -32,7 +32,6 @@ htmlcov/
 # Project data files & artifacts
 /brreg-enheter.csv
 /signalpost-universe.jsonl.gz
-/entry-companies.jsonl
 /smoke-companies.jsonl
 out/
 *.log
