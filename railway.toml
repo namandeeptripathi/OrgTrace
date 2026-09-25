@@ -1,6 +1,6 @@
 [build]
 builder = "NIXPACKS"
-buildCommand = "pip install -r requirements.txt"
+buildCommand = "pip install -r requirements.txt && mkdir -p out && tar -xzf data/benchmark-data.tar.gz -C out"
 
 [deploy]
 startCommand = "uvicorn norway_company_agent.api:app --host 0.0.0.0 --port $PORT --workers 1"
