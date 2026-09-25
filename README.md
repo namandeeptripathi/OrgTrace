@@ -85,45 +85,60 @@ Automated corporate research frequently suffers from entity confusion, hallucina
 
 ```mermaid
 flowchart TD
-    subgraph Inputs ["1. Input Universe"]
-        IN1["entry-companies.jsonl<br/>(1,000 Cohort)"]
-        IN2["brreg-enheter.csv<br/>(1.17M Bulk Snapshot)"]
-        IN3["Signalpost Universe<br/>(411,160 Entities)"]
-    end
-
-    subgraph Pipeline ["2. OrgTrace Core Engine (Batch & CLI)"]
+    %% ─── FLOW A: COMPETITION / DATA PIPELINE ───
+    subgraph Pipeline ["A. COMPETITION & DATA PIPELINE"]
         direction TB
-        IE["Identity Engine<br/>(Modulo 11 + Exact Canonicalization)"]
-        FI["Financial Intelligence<br/>(Regnskapsloven + Regnskapsregisteret)"]
-        WD["Website Discovery & Identity Gate<br/>(Domain Verification + SSRF Guard)"]
-        EE["Evidence & Provenance Engine<br/>(SHA-256 Hashes + 4-Tier Sources)"]
-        CI["Change Intelligence<br/>(Semantic Diffing + Failed-Refresh Guard)"]
-        EXP["Explanation Generator<br/>(100% Grounded Natural Language)"]
 
-        IE --> FI --> WD --> EE --> CI --> EXP
+        IN["1. Company Input<br/>(9-digit organisation numbers)"]
+        BULK["Canonical Registry Snapshot<br/>(Brønnøysundregistrene 1.17M entities)"]
+
+        IDENT["2. Exact Identity Resolution<br/>Modulo 11 check • Canonical legal entity anchor"]
+
+        ENRICH["3. Official Registry + Financial Data<br/>Live corporate status • Statutory accounting filings"]
+
+        WEB["4. First-Party Web Discovery<br/>Domain discovery & crawl • Search fallback"]
+
+        GATE{"5. Identity Gate<br/>Exact org / address match?"}
+
+        PROV["6. Evidence & Provenance<br/>SHA-256 hashes • Timestamps • Claim spans"]
+
+        DIFF["7. Change Intelligence<br/>Semantic diffing • Failed-refresh preservation"]
+
+        OUT["8. Terminal Output & Validation<br/>Validated envelopes • Profiles • Run report (0 silent drops)"]
+
+        GUARD["Bounded Resource Guard<br/>Thread-safe request, runtime & cost caps"]
+
+        IN --> IDENT
+        BULK --> IDENT
+        IDENT --> ENRICH
+        IDENT --> WEB
+        WEB --> GATE
+        GATE -->|Verified domain| PROV
+        GATE -.->|Unverified / parked| PROV
+        ENRICH --> PROV
+        PROV --> DIFF
+        DIFF --> OUT
+        GUARD -.->|Enforces budget| ENRICH & WEB
     end
 
-    subgraph Artifacts ["3. Terminal Outputs (OUTPUT_CONTRACT.md)"]
-        OUT1["out/envelopes.jsonl<br/>(1,000 Valid Envelopes)"]
-        OUT2["out/profiles.jsonl<br/>(Enriched Profiles)"]
-        OUT3["out/run-report.json<br/>(Audit Telemetry)"]
+    %% ─── FLOW B: PRODUCTION / SERVING ───
+    subgraph Serving ["B. PRODUCTION / SERVING"]
+        direction TB
+
+        DATA["Verified Dataset<br/>(1,000 benchmark profiles)"]
+        API["Railway / FastAPI<br/>Stateless in-memory cache"]
+        REST["REST API<br/>Stats • Search • Company • Telemetry"]
+        VERCEL["Vercel / Next.js<br/>App Router • Serverless edge rendering"]
+        UI["Interactive User Experience<br/>Search / Company Profile / Evidence Chain"]
+
+        DATA --> API
+        API --> REST
+        REST <--> VERCEL
+        VERCEL --> UI
     end
 
-    subgraph Serving ["4. Production Serving Layer"]
-        API["FastAPI Backend (Railway)<br/>Stateless In-Memory DataStore"]
-        WEB["Next.js 16 Web App (Vercel)<br/>Search • Detail • Evidence Drawer"]
-        API <--> WEB
-    end
-
-    IN1 --> IE
-    IN2 --> IE
-    IN3 -.-> IN1
-    EXP --> OUT1
-    EXP --> OUT2
-    EXP --> OUT3
-    OUT1 -.->|Bundled in Docker/Nixpacks| API
-    OUT2 -.->|Bundled in Docker/Nixpacks| API
-    OUT3 -.->|Bundled in Docker/Nixpacks| API
+    %% ─── PIPELINE TO SERVING LINK ───
+    OUT -.->|Packaged deployment bundle| DATA
 ```
 
 For full architectural details, see [`docs/architecture.md`](docs/architecture.md).
