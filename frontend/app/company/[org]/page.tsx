@@ -18,8 +18,8 @@ interface PageProps {
 
 export default async function CompanyPage({ params }: PageProps) {
   const { org } = await params;
-  const profile = getProfileByOrgNumber(org);
-  const envelope = getEnvelopeByOrgNumber(org);
+  const profile = await getProfileByOrgNumber(org);
+  const envelope = await getEnvelopeByOrgNumber(org);
 
   if (!profile) return notFound();
 

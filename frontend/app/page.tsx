@@ -4,9 +4,9 @@ import { SearchHero } from "./components/SearchHero";
 import { CompanyTable } from "./components/CompanyTable";
 import { StatsGrid } from "./components/StatsGrid";
 
-export default function HomePage() {
-  const stats = getDashboardStats();
-  const profiles = getProfiles();
+export default async function HomePage() {
+  const stats = await getDashboardStats();
+  const profiles = await getProfiles();
 
   return (
     <div className="animate-in">

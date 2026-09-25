@@ -5,11 +5,36 @@ import * as path from "path";
 /**
  * Data loading utilities for the OrgTrace frontend.
  *
- * Reads pre-generated JSONL / JSON artifacts from the `out/` directory
- * at the repository root. This is a server-side module only.
+ * Supports two runtime modes:
+ * 1. Production API mode: When NEXT_PUBLIC_API_URL is configured, fetches from FastAPI backend.
+ * 2. Local fallback mode: When NEXT_PUBLIC_API_URL is absent, reads pre-generated JSONL / JSON
+ *    artifacts from the `../out/` directory.
  */
 
+const API_BASE_URL = (process.env.NEXT_PUBLIC_API_URL || "").trim().replace(/\/$/, "");
 const OUT_DIR = path.resolve(process.cwd(), "..", "out");
+
+// ─── HTTP API Client (Production / Remote) ───
+
+async function fetchApi<T>(endpoint: string): Promise<T | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}${endpoint}`, {
+      next: { revalidate: 60 },
+    });
+    if (!res.ok) {
+      if (res.status !== 404) {
+        console.warn(`[OrgTrace API] Status ${res.status} on ${endpoint}`);
+      }
+      return null;
+    }
+    return (await res.json()) as T;
+  } catch (err) {
+    console.warn(`[OrgTrace API] Network error on ${endpoint}:`, err);
+    return null;
+  }
+}
+
+// ─── Local Filesystem Reader (Local Development Fallback) ───
 
 function readJsonlFile<T>(filename: string): T[] {
   const filePath = path.join(OUT_DIR, filename);
@@ -28,52 +53,42 @@ function readJsonFile<T>(filename: string): T | null {
   return JSON.parse(content) as T;
 }
 
-// ─── Cached Data ───
+let _localEnvelopes: CompanyEnvelope[] | null = null;
+let _localProfiles: CompanyProfile[] | null = null;
+let _localReport: RunReport | null | undefined = undefined;
 
-let _envelopes: CompanyEnvelope[] | null = null;
-let _profiles: CompanyProfile[] | null = null;
-let _report: RunReport | null | undefined = undefined;
-
-export function getEnvelopes(): CompanyEnvelope[] {
-  if (!_envelopes) {
-    _envelopes = readJsonlFile<CompanyEnvelope>("envelopes.jsonl");
+function getEnvelopesLocal(): CompanyEnvelope[] {
+  if (!_localEnvelopes) {
+    _localEnvelopes = readJsonlFile<CompanyEnvelope>("envelopes.jsonl");
   }
-  return _envelopes;
+  return _localEnvelopes;
 }
 
-export function getProfiles(): CompanyProfile[] {
-  if (!_profiles) {
-    _profiles = readJsonlFile<CompanyProfile>("profiles.jsonl");
+function getProfilesLocal(): CompanyProfile[] {
+  if (!_localProfiles) {
+    _localProfiles = readJsonlFile<CompanyProfile>("profiles.jsonl");
   }
-  return _profiles;
+  return _localProfiles;
 }
 
-export function getRunReport(): RunReport | null {
-  if (_report === undefined) {
-    _report = readJsonFile<RunReport>("run-report.json");
+function getRunReportLocal(): RunReport | null {
+  if (_localReport === undefined) {
+    _localReport = readJsonFile<RunReport>("run-report.json");
   }
-  return _report;
+  return _localReport;
 }
 
-// ─── Search / Lookup ───
-
-export function searchProfiles(
-  query: string,
-  limit: number = 50
-): CompanyProfile[] {
+function searchProfilesLocal(query: string, limit: number = 50): CompanyProfile[] {
   const q = query.trim().toLowerCase();
-  if (!q) return getProfiles().slice(0, limit);
+  if (!q) return getProfilesLocal().slice(0, limit);
 
-  const profiles = getProfiles();
-
-  // Exact org number match goes first
+  const profiles = getProfilesLocal();
   const exact = profiles.find(
     (p) => p.organisation_number === q.replace(/\s/g, "")
   );
   if (exact) return [exact];
 
-  // Name match
-  const matches = profiles
+  return profiles
     .filter(
       (p) =>
         p.name.toLowerCase().includes(q) ||
@@ -82,27 +97,19 @@ export function searchProfiles(
         p.municipality?.toLowerCase().includes(q)
     )
     .slice(0, limit);
-
-  return matches;
 }
 
-export function getProfileByOrgNumber(
-  orgNumber: string
-): CompanyProfile | null {
+function getProfileByOrgNumberLocal(orgNumber: string): CompanyProfile | null {
   return (
-    getProfiles().find((p) => p.organisation_number === orgNumber) ?? null
+    getProfilesLocal().find((p) => p.organisation_number === orgNumber) ?? null
   );
 }
 
-export function getEnvelopeByOrgNumber(
-  orgNumber: string
-): CompanyEnvelope | null {
+function getEnvelopeByOrgNumberLocal(orgNumber: string): CompanyEnvelope | null {
   return (
-    getEnvelopes().find((e) => e.organisation_number === orgNumber) ?? null
+    getEnvelopesLocal().find((e) => e.organisation_number === orgNumber) ?? null
   );
 }
-
-// ─── Aggregate Stats ───
 
 export interface DashboardStats {
   totalProfiles: number;
@@ -120,9 +127,9 @@ export interface DashboardStats {
   statusBreakdown: { status: string; count: number }[];
 }
 
-export function getDashboardStats(): DashboardStats {
-  const profiles = getProfiles();
-  const report = getRunReport();
+function getDashboardStatsLocal(): DashboardStats {
+  const profiles = getProfilesLocal();
+  const report = getRunReportLocal();
 
   const industryCounts: Record<string, number> = {};
   const municipalityCounts: Record<string, number> = {};
@@ -155,12 +162,6 @@ export function getDashboardStats(): DashboardStats {
     .slice(0, 10)
     .map(([label, count]) => ({ label, count }));
 
-  const legalFormCounts: Record<string, number> = {};
-  for (const p of profiles) {
-    const lf = p.legal_form || "Unknown";
-    legalFormCounts[lf] = (legalFormCounts[lf] || 0) + 1;
-  }
-
   return {
     totalProfiles: profiles.length,
     complete,
@@ -180,4 +181,75 @@ export function getDashboardStats(): DashboardStats {
       { status: "failed", count: failed },
     ],
   };
+}
+
+// ─── Public Async API Data Functions (Universal API / Fallback) ───
+
+export async function getDashboardStats(): Promise<DashboardStats> {
+  if (API_BASE_URL) {
+    const stats = await fetchApi<DashboardStats>("/api/stats");
+    if (stats) return stats;
+  }
+  return getDashboardStatsLocal();
+}
+
+export async function getProfiles(): Promise<CompanyProfile[]> {
+  if (API_BASE_URL) {
+    const data = await fetchApi<{ results: CompanyProfile[]; total: number }>(
+      "/api/companies?limit=100"
+    );
+    if (data && Array.isArray(data.results)) return data.results;
+  }
+  return getProfilesLocal();
+}
+
+export async function getEnvelopes(): Promise<CompanyEnvelope[]> {
+  return getEnvelopesLocal();
+}
+
+export async function searchProfiles(
+  query: string,
+  limit: number = 50
+): Promise<CompanyProfile[]> {
+  if (API_BASE_URL) {
+    const data = await fetchApi<{ results: CompanyProfile[]; total: number }>(
+      `/api/companies?q=${encodeURIComponent(query)}&limit=${limit}`
+    );
+    if (data && Array.isArray(data.results)) return data.results;
+  }
+  return searchProfilesLocal(query, limit);
+}
+
+export async function getProfileByOrgNumber(
+  orgNumber: string
+): Promise<CompanyProfile | null> {
+  if (API_BASE_URL) {
+    const data = await fetchApi<{ profile: CompanyProfile; envelope: CompanyEnvelope | null }>(
+      `/api/company/${encodeURIComponent(orgNumber)}`
+    );
+    if (data && data.profile) return data.profile;
+    return null;
+  }
+  return getProfileByOrgNumberLocal(orgNumber);
+}
+
+export async function getEnvelopeByOrgNumber(
+  orgNumber: string
+): Promise<CompanyEnvelope | null> {
+  if (API_BASE_URL) {
+    const data = await fetchApi<{ profile: CompanyProfile | null; envelope: CompanyEnvelope }>(
+      `/api/company/${encodeURIComponent(orgNumber)}`
+    );
+    if (data && data.envelope) return data.envelope;
+    return null;
+  }
+  return getEnvelopeByOrgNumberLocal(orgNumber);
+}
+
+export async function getRunReport(): Promise<RunReport | null> {
+  if (API_BASE_URL) {
+    const report = await fetchApi<RunReport>("/api/batch");
+    if (report) return report;
+  }
+  return getRunReportLocal();
 }

@@ -8,8 +8,8 @@ import {
   statusLabel,
 } from "../lib/format";
 
-export default function BatchPage() {
-  const report = getRunReport();
+export default async function BatchPage() {
+  const report = await getRunReport();
 
   if (!report) {
     return (

@@ -6,7 +6,7 @@ export async function GET(request: NextRequest) {
   const q = searchParams.get("q") || "";
   const limit = parseInt(searchParams.get("limit") || "20", 10);
 
-  const profiles = searchProfiles(q, limit);
+  const profiles = await searchProfiles(q, limit);
   const results = profiles.map((p) => ({
     organisation_number: p.organisation_number,
     name: p.name,
