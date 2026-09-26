@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
@@ -20,6 +22,7 @@ from norway_company_agent.explanations import explain_company_profile  # noqa: E
 from norway_company_agent.http import fetch_json  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
+from norway_company_agent.profile_extraction import extract_company_profile  # noqa: E402
 from norway_company_agent.resilience import CompetitionExecutionGuard, FailureCategory, classify_failure  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
@@ -46,7 +49,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
-    parser.add_argument("--modules", default="registry,accounting_obligation,registry_live,financials,roles,group,locations,website")
+    parser.add_argument("--modules", default="registry,accounting_obligation,financials,roles,locations,website")
     parser.add_argument("--max-requests", type=int, default=2000, help="Maximum external requests per execution")
     parser.add_argument("--max-cost", type=float, default=10.0, help="Maximum external API cost in USD")
     parser.add_argument("--max-runtime", type=float, default=2700.0, help="Maximum execution runtime in seconds (45 min = 2700s)")
@@ -80,92 +83,8 @@ def main() -> None:
             if key in annotations[profile["organisation_number"]]:
                 profile[key] = annotations[profile["organisation_number"]][key]
     requested_modules = [item.strip() for item in args.modules.split(",") if item.strip()]
-    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "website"}
+    fetch_modules = set(requested_modules) - {"registry", "accounting_obligation", "locations", "website"}
     operations = {"requests": 0, "bytes": 0, "latencies_ms": []}
-
-    def enrich(profile: dict) -> tuple[dict, dict]:
-        try:
-            records, metrics = fetch_official_modules(
-                profile["organisation_number"],
-                fetch_modules,
-                fetcher=lambda u: fetch_json(u, guard=guard),
-            )
-            profile.setdefault("evidence", {}).update(records)
-            website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
-            if "website" in requested_modules:
-                if profile.get("website"):
-                    # Registry website exists — use the existing direct-fetch path.
-                    website_record, website_metrics = fetch_website(profile.get("website"), guard=guard)
-                    profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
-                elif brave_api_key and not guard.is_reduced_mode():
-                    # No registry website — attempt discovery fallback if budget permits.
-                    allowed, reason = guard.acquire_request(cost=0.005)
-                    if allowed:
-                        search_results, search_op = brave_search(
-                            profile, brave_api_key,
-                            timeout=args.discovery_timeout, count=args.discovery_count,
-                        )
-                        website_metrics["requests"] += 1
-                        website_metrics["bytes"] += search_op.get("bytes", 0)
-                        if search_op.get("latency_ms"):
-                            website_metrics["latencies_ms"].append(search_op["latency_ms"])
-                        decision = choose_search_candidate(profile, search_results)
-                        selected = decision.get("selected")
-                        if selected:
-                            website_record, crawl_metrics = fetch_website(selected["url"], guard=guard)
-                            website_metrics["requests"] += crawl_metrics["requests"]
-                            website_metrics["bytes"] += crawl_metrics["bytes"]
-                            website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
-                            gated = apply_website_identity_gate(profile, website_record)
-                            website = gated["website"]
-                            assessment = gated.get("assessment")
-                            website["source_type"] = "search_discovered_company_website"
-                            if assessment and assessment.get("publishable") and website.get("status") == "available":
-                                profile["evidence"]["website"] = website
-                            else:
-                                profile["evidence"]["website"] = evidence(
-                                    "website", "not_found",
-                                    "search_discovered_company_website", selected["url"],
-                                    note="Search candidate crawled but exact-entity identity not verified",
-                                )
-                        else:
-                            profile["evidence"]["website"] = evidence(
-                                "website", "not_found",
-                                "search_discovery", "https://api.search.brave.com/res/v1/web/search",
-                                note="No search result passed the deterministic crawl-candidate gate",
-                            )
-                    else:
-                        profile["evidence"]["website"] = evidence(
-                            "website", "not_attempted",
-                            "search_discovery", "https://api.search.brave.com/res/v1/web/search",
-                            note=f"Search discovery skipped: {reason}",
-                        )
-                else:
-                    note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
-                    profile["evidence"]["website"] = evidence(
-                        "website", "not_found",
-                        "registry_linked_company_website",
-                        "https://data.brreg.no/enhetsregisteret/api/enheter",
-                        note=note,
-                    )
-            metric = {
-                "requests": len(metrics) + website_metrics["requests"],
-                "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
-                "latencies_ms": [item.elapsed_ms for item in metrics] + website_metrics["latencies_ms"],
-            }
-            profile["run_metrics"] = metric
-            return profile, metric
-        except Exception as exc:
-            fail_cat = classify_failure(exc)
-            profile.setdefault("errors", []).append({
-                "error": str(exc),
-                "category": fail_cat.value,
-                "type": type(exc).__name__,
-            })
-            metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
-            profile["run_metrics"] = {**metric, "status": "failed", "error": str(exc), "category": fail_cat.value}
-            guard.record_request_result(domain="unknown", status_code=0, failure_category=fail_cat)
-            return profile, metric
 
     state: dict[str, dict] = {}
     resumed_profiles = 0
@@ -181,6 +100,190 @@ def main() -> None:
         }
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
+
+    # Dynamic request budgeting: allocate budget across modules so roles never starves
+    # mandatory core registry financials or verified company websites.
+    if "roles" in fetch_modules:
+        pending_count = len(pending_profiles)
+        sites_count = sum(1 for p in pending_profiles if p.get("website"))
+        financials_needed = pending_count if "financials" in fetch_modules else 0
+        websites_needed = int(sites_count * 5.0) if "website" in requested_modules else 0
+        safety_buffer = min(60, max(20, int(guard.max_requests * 0.03)))
+        available_for_roles = guard.max_requests - financials_needed - websites_needed - safety_buffer
+        max_roles_budget = max(0, min(pending_count, available_for_roles))
+    else:
+        max_roles_budget = 0
+
+    # Prioritize roles for companies with websites, active trading status, and employees
+    def _role_priority(p: dict) -> tuple[int, int, int]:
+        has_site = 1 if p.get("website") else 0
+        emp = p.get("employees") or 0
+        active = 0 if (p.get("bankrupt") or p.get("liquidating")) else 1
+        return (has_site, active, emp)
+
+    sorted_for_roles = sorted(pending_profiles, key=_role_priority, reverse=True)
+    eligible_for_roles = {p["organisation_number"] for p in sorted_for_roles[:max_roles_budget]}
+    roles_budget_lock = threading.Lock()
+    roles_budget_state = {"count": 0}
+
+    discovery_stats_lock = threading.Lock()
+    discovery_stats = {
+        "attempts": 0,
+        "candidates_found": 0,
+        "candidates_crawled": 0,
+        "candidates_accepted": 0,
+        "candidates_rejected": 0,
+        "rejection_reasons": {},
+    }
+
+    def enrich(profile: dict) -> tuple[dict, dict]:
+        try:
+            profile_fetch_modules = set(fetch_modules)
+            should_fetch_roles = False
+            if "roles" in profile_fetch_modules:
+                if profile["organisation_number"] in eligible_for_roles:
+                    with roles_budget_lock:
+                        if roles_budget_state["count"] < max_roles_budget and guard.remaining_requests > 60:
+                            roles_budget_state["count"] += 1
+                            should_fetch_roles = True
+                if not should_fetch_roles:
+                    profile_fetch_modules.discard("roles")
+
+            records, metrics = fetch_official_modules(
+                profile["organisation_number"],
+                profile_fetch_modules,
+                fetcher=lambda u: fetch_json(u, guard=guard),
+            )
+            if "roles" in requested_modules and "roles" not in records:
+                roles_url = f"https://data.brreg.no/enhetsregisteret/api/enheter/{profile['organisation_number']}/roller"
+                note = "Role enrichment omitted to preserve execution budget for core registry, financials, and verified websites"
+                records["roles"] = evidence(
+                    "roles",
+                    "not_attempted",
+                    "official_roles",
+                    roles_url,
+                    note=note,
+                    content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                    retrieved_at=utc_now(),
+                )
+            profile.setdefault("evidence", {}).update(records)
+            website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
+            if "website" in requested_modules:
+                if profile.get("website"):
+                    # Registry website exists — use the existing direct-fetch path.
+                    website_record, website_metrics = fetch_website(profile.get("website"), guard=guard)
+                    profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
+                elif brave_api_key and not guard.is_reduced_mode():
+                    # No registry website — attempt discovery fallback if budget permits.
+                    allowed, reason = guard.acquire_request(cost=0.005)
+                    if allowed:
+                        with discovery_stats_lock:
+                            discovery_stats["attempts"] += 1
+                        search_results, search_op = brave_search(
+                            profile, brave_api_key,
+                            timeout=args.discovery_timeout, count=args.discovery_count,
+                        )
+                        website_metrics["requests"] += 1
+                        website_metrics["bytes"] += search_op.get("bytes", 0)
+                        if search_op.get("latency_ms"):
+                            website_metrics["latencies_ms"].append(search_op["latency_ms"])
+                        with discovery_stats_lock:
+                            discovery_stats["candidates_found"] += len(search_results)
+                        decision = choose_search_candidate(profile, search_results)
+                        selected = decision.get("selected")
+                        if selected:
+                            with discovery_stats_lock:
+                                discovery_stats["candidates_crawled"] += 1
+                            website_record, crawl_metrics = fetch_website(selected["url"], guard=guard)
+                            website_metrics["requests"] += crawl_metrics["requests"]
+                            website_metrics["bytes"] += crawl_metrics["bytes"]
+                            website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
+                            gated = apply_website_identity_gate(profile, website_record)
+                            website = gated["website"]
+                            assessment = gated.get("assessment")
+                            website["source_type"] = "search_discovered_company_website"
+                            if assessment and assessment.get("publishable") and website.get("status") == "available":
+                                profile["evidence"]["website"] = website
+                                with discovery_stats_lock:
+                                    discovery_stats["candidates_accepted"] += 1
+                            else:
+                                rej_reason = "Search candidate crawled but exact-entity identity not verified"
+                                profile["evidence"]["website"] = evidence(
+                                    "website", "not_found",
+                                    "search_discovered_company_website", selected["url"],
+                                    note=rej_reason,
+                                    content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                                )
+                                with discovery_stats_lock:
+                                    discovery_stats["candidates_rejected"] += 1
+                                    discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
+                        else:
+                            rej_reason = decision.get("rejection_reason") or "No search result passed the deterministic crawl-candidate gate"
+                            profile["evidence"]["website"] = evidence(
+                                "website", "not_found",
+                                "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                                note=rej_reason,
+                                content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                            )
+                            with discovery_stats_lock:
+                                discovery_stats["candidates_rejected"] += 1
+                                discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
+                    else:
+                        note = f"Search discovery skipped: {reason}"
+                        profile["evidence"]["website"] = evidence(
+                            "website", "not_attempted",
+                            "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                            note=note,
+                            content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                        )
+                else:
+                    note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
+                    profile["evidence"]["website"] = evidence(
+                        "website", "not_found",
+                        "registry_linked_company_website",
+                        "https://data.brreg.no/enhetsregisteret/api/enheter",
+                        note=note,
+                        content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                    )
+
+            # Phase 2 & 6: Extract full profile domains from official & verified sources
+            ext = extract_company_profile(profile)
+            profile["people"] = [p for p in (ext.people.value or []) if not p.get("inactive")]
+            profile["leadership"] = ext.leadership.value or []
+            profile["locations"] = ext.locations.value or []
+            profile["jobs"] = ext.careers.to_dict()
+            profile["careers"] = ext.careers.to_dict()
+            profile["public_activity"] = ext.news.to_dict()
+            profile["news"] = ext.news.to_dict()
+            profile["products_and_services"] = ext.products_and_services.to_dict()
+            profile["customers_and_markets"] = ext.customers_and_markets.to_dict()
+            profile["certifications"] = ext.certifications.to_dict()
+            profile["corporate_governance"] = ext.corporate_governance.to_dict()
+            profile["description_extracted"] = ext.description.to_dict()
+            profile["industry_extracted"] = ext.industry.to_dict()
+            profile["contact_extracted"] = ext.contact.to_dict()
+            profile["employees_extracted"] = ext.employees.to_dict()
+            profile["extracted_profile"] = ext.to_dict()
+
+            actual_official_requests = sum(1 for item in metrics if item.status > 0)
+            metric = {
+                "requests": actual_official_requests + website_metrics["requests"],
+                "bytes": sum(item.bytes_received for item in metrics) + website_metrics["bytes"],
+                "latencies_ms": [item.elapsed_ms for item in metrics if item.status > 0] + website_metrics["latencies_ms"],
+            }
+            profile["run_metrics"] = metric
+            return profile, metric
+        except Exception as exc:
+            fail_cat = classify_failure(exc)
+            profile.setdefault("errors", []).append({
+                "error": str(exc),
+                "category": fail_cat.value,
+                "type": type(exc).__name__,
+            })
+            metric = {"requests": 0, "bytes": 0, "latencies_ms": []}
+            profile["run_metrics"] = {**metric, "status": "failed", "error": str(exc), "category": fail_cat.value}
+            guard.record_request_result(domain="unknown", status_code=0, failure_category=fail_cat)
+            return profile, metric
 
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {pool.submit(enrich, profile): profile["organisation_number"] for profile in pending_profiles}
@@ -320,6 +423,15 @@ def main() -> None:
             "total_evaluated": len(change_reports),
             "with_material_changes": sum(1 for cr in change_reports if cr.get("material_changes", 0) > 0),
             "initial_observations": sum(1 for cr in change_reports if cr.get("status") == "INITIAL_OBSERVATION"),
+        },
+        "discovery": discovery_stats,
+        "coverage": {
+            "profiles_with_people": sum(1 for p in ordered_profiles if bool(p.get("people"))),
+            "profiles_with_locations": sum(1 for p in ordered_profiles if bool(p.get("locations"))),
+            "profiles_with_verified_website": sum(1 for p in ordered_profiles if (p.get("evidence") or {}).get("website", {}).get("status") == "available"),
+            "profiles_with_jobs": sum(1 for p in ordered_profiles if (p.get("jobs") or {}).get("status") == "found"),
+            "profiles_with_public_activity": sum(1 for p in ordered_profiles if (p.get("public_activity") or {}).get("status") == "found"),
+            "profiles_with_products_services": sum(1 for p in ordered_profiles if (p.get("products_and_services") or {}).get("status") == "found"),
         },
         "explanations": {
             "total_evaluated": len(explanation_reports),

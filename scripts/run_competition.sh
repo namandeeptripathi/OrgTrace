@@ -70,7 +70,7 @@ case "${MODE}" in
             --max-requests 2000 \
             --max-cost 10.0 \
             --max-runtime 2700.0 \
-            --modules registry,accounting_obligation,website,financials "$@"
+            --modules registry,accounting_obligation,financials,roles,locations,website "$@"
         echo ""
         echo "SUCCESS: 1,000-profile batch complete."
         echo "  - Envelopes: out/envelopes.jsonl"
@@ -117,6 +117,8 @@ case "${MODE}" in
             echo "Usage: ./scripts/run_competition.sh eval <path-to-100-company-file.jsonl>"
             exit 1
         fi
+        EVAL_INPUT="$1"
+        shift || true
         echo "================================================================================"
         echo " OrgTrace: Running 100-Company Evaluation Batch"
         echo "================================================================================"
@@ -125,23 +127,26 @@ case "${MODE}" in
         if [ -f "brreg-enheter.csv" ]; then
             BULK_ARGS=(--bulk brreg-enheter.csv)
         fi
+        OUT_PROFILES="${PROFILES_OUT:-out/profiles.jsonl}"
+        OUT_ENVELOPES="${ENVELOPES_OUT:-out/envelopes.jsonl}"
+        OUT_REPORT="${REPORT_OUT:-out/run-report.json}"
         ${PYTHON_CMD} scripts/run_competition_batch.py \
-            --organisations "$1" \
+            --organisations "${EVAL_INPUT}" \
             "${BULK_ARGS[@]}" \
-            --profiles-output out/profiles.jsonl \
-            --output out/envelopes.jsonl \
-            --report out/run-report.json \
+            --profiles-output "${OUT_PROFILES}" \
+            --output "${OUT_ENVELOPES}" \
+            --report "${OUT_REPORT}" \
             --run-id eval-100 \
             --expected-count 100 \
             --max-requests 2000 \
             --max-cost 10.0 \
             --max-runtime 2700.0 \
-            --modules registry,accounting_obligation,website,financials
+            --modules registry,accounting_obligation,financials,roles,locations,website "$@"
         echo ""
         echo "SUCCESS: 100-company evaluation batch complete."
-        echo "  - Envelopes: out/envelopes.jsonl"
-        echo "  - Profiles:  out/profiles.jsonl"
-        echo "  - Report:    out/run-report.json"
+        echo "  - Envelopes: ${OUT_ENVELOPES}"
+        echo "  - Profiles:  ${OUT_PROFILES}"
+        echo "  - Report:    ${OUT_REPORT}"
         ;;
     eval-legacy|--eval-legacy)
         echo "================================================================================"

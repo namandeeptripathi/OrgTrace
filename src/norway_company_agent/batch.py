@@ -105,6 +105,16 @@ def profiles_from_bulk(
                             source_row_key=org,
                         ),
                         "accounting_obligation": accounting_obligation_assessment(entity),
+                        "locations": evidence(
+                            "locations",
+                            "available" if (entity.get("business_address") or entity.get("postal_address")) else "not_found",
+                            "official_registry_live",
+                            BRREG_ENTITY.format(org=org),
+                            value={"locations": []},
+                            retrieved_at=retrieved_at,
+                            content_sha256=res.content_sha256,
+                            source_row_key=org,
+                        ),
                     },
                 }
             else:
@@ -130,6 +140,14 @@ def profiles_from_bulk(
                             note="No registry profile available to determine accounting obligation",
                             retrieved_at=retrieved_at,
                         ),
+                        "locations": evidence(
+                            "locations",
+                            "not_applicable",
+                            "official_registry_live",
+                            BRREG_ENTITY.format(org=org),
+                            note="No registry profile available to determine locations",
+                            retrieved_at=retrieved_at,
+                        ),
                     },
                 }
         return [found[org] for org in requested], {
@@ -149,6 +167,7 @@ def profiles_from_bulk(
         if org not in wanted:
             continue
         raw = profile.pop("raw", {})
+        has_location = bool(profile.get("business_address") or profile.get("postal_address") or profile.get("municipality"))
         profile["evidence"] = {
             "registry": evidence(
                 "registry",
@@ -161,6 +180,16 @@ def profiles_from_bulk(
                 source_row_key=org,
             ),
             "accounting_obligation": accounting_obligation_assessment(profile),
+            "locations": evidence(
+                "locations",
+                "available" if has_location else "not_found",
+                "official_registry_bulk",
+                "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                value={"locations": []},
+                retrieved_at=retrieved_at,
+                content_sha256=snapshot_sha256,
+                source_row_key=org,
+            ),
         }
         found[org] = profile
         if len(found) == len(wanted):
@@ -191,6 +220,16 @@ def profiles_from_bulk(
                     "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
                     note="No registry profile available to determine accounting obligation",
                     retrieved_at=retrieved_at,
+                    content_sha256=snapshot_sha256,
+                ),
+                "locations": evidence(
+                    "locations",
+                    "not_applicable",
+                    "official_registry_bulk",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/lastned/csv",
+                    note="No registry profile available to determine locations",
+                    retrieved_at=retrieved_at,
+                    content_sha256=snapshot_sha256,
                 ),
             },
         }

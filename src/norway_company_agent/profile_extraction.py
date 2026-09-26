@@ -78,6 +78,9 @@ class ExtractedCompanyProfile:
     corporate_governance: ExtractedField[dict[str, Any]] = field(
         default_factory=lambda: ExtractedField("corporate_governance", None, FieldStatus.UNAVAILABLE, note="Corporate governance source unavailable")
     )
+    people: ExtractedField[list[dict[str, Any]]] = field(
+        default_factory=lambda: ExtractedField("people", [], FieldStatus.UNAVAILABLE, note="People/roles source unavailable")
+    )
 
     def to_dict(self) -> dict[str, Any]:
         data = {
@@ -102,6 +105,8 @@ class ExtractedCompanyProfile:
             data["certifications"] = self.certifications.to_dict()
         if self.corporate_governance is not None:
             data["corporate_governance"] = self.corporate_governance.to_dict()
+        if self.people is not None:
+            data["people"] = self.people.to_dict()
         return data
 
 
@@ -113,8 +118,14 @@ EMAIL_REGEX = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
 PHONE_REGEX = re.compile(r"(?:\+47\s*)?(?:[2-9]\d{1}(?:\s*\d{2}){3}|[2-9]\d{2}(?:\s*\d{2}){2}|[2-9]\d{7})")
 NORWEGIAN_POSTAL_REGEX = re.compile(r"\b(\d{4})\s+([A-ZÆØÅa-zæøå\s-]+)\b")
 
-CAREERS_PATH = re.compile(r"/(?:karriere|careers|jobs|jobb|stillinger|ledige-stillinger|work-with-us)(?:/|$)", re.I)
-NEWS_PATH = re.compile(r"/(?:news|press|aktuelt|nyheter|pressemeldinger|artikler|blog)(?:/|$)", re.I)
+CAREERS_PATH = re.compile(
+    r"/(?:karriere|careers|career|jobs|jobb|job|stillinger|stilling|ledige-stillinger|ledige_stillinger|jobbe-hos-oss|bli-en-av-oss|arbeide-hos-oss|work-with-us|work_with_us|work|hiring|vacancies|rekruttering)(?:/|$|[?#])",
+    re.I,
+)
+NEWS_PATH = re.compile(
+    r"/(?:news|press|presse|aktuelt|nyheter|pressemeldinger|pressemelding|artikler|blog|media|siste-nytt|nyhetsarkiv|medieomtale)(?:/|$|[?#])",
+    re.I,
+)
 
 LEADERSHIP_ROLES = (
     "ceo", "chief executive officer", "daglig leder", "adm. dir", "administrerende direktør",
@@ -551,30 +562,97 @@ def extract_locations(
     locations: list[dict[str, Any]] = []
     seen: set[str] = set()
 
-    # 1. Official BRREG subunits (underenheter)
-    reg_locations = ((profile.get("evidence") or {}).get("locations", {}).get("value") or {}).get("locations") or []
-    for loc in reg_locations:
-        name = loc.get("name")
-        addr_dict = loc.get("address") or {}
-        addr_line = addr_dict.get("adresse") if isinstance(addr_dict, dict) else str(addr_dict)
-        if isinstance(addr_line, list):
-            addr_line = ", ".join(addr_line)
-        post_code = addr_dict.get("postnummer") if isinstance(addr_dict, dict) else None
-        city = addr_dict.get("poststed") or addr_dict.get("kommune") if isinstance(addr_dict, dict) else None
+    evidence_dict = profile.get("evidence") or {}
+    locations_ev = evidence_dict.get("locations") or {}
+    locations_val = locations_ev.get("value") or {}
+    reg_locations = locations_val.get("locations") or []
+    locations_url = locations_ev.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/underenheter?overordnetEnhet={profile.get('organisation_number')}&size=1000"
+    locations_retrieved = locations_ev.get("retrieved_at")
 
-        key = f"{normalize_legal_name(name)}|{normalize_legal_name(addr_line)}|{post_code}"
+    registry_ev = evidence_dict.get("registry") or evidence_dict.get("registry_live") or {}
+    registry_url = registry_ev.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/enheter/{profile.get('organisation_number')}"
+    registry_retrieved = registry_ev.get("retrieved_at")
+
+    # 1. Official BRREG subunits (underenheter)
+    for loc in reg_locations:
+        name = loc.get("name") or profile.get("name")
+        addr_dict = loc.get("address") or {}
+        if isinstance(addr_dict, dict):
+            raw_addr = addr_dict.get("adresse") or []
+            addr_line = ", ".join(raw_addr) if isinstance(raw_addr, list) else str(raw_addr or "")
+            post_code = addr_dict.get("postnummer")
+            city = addr_dict.get("poststed") or addr_dict.get("kommune")
+        else:
+            addr_line = str(addr_dict) if addr_dict else ""
+            post_code = None
+            city = None
+
+        key = f"{normalize_legal_name(name)}|{normalize_legal_name(addr_line)}|{post_code or ''}|{city or ''}"
         if key not in seen:
             seen.add(key)
+            ind = loc.get("industry")
+            ind_dict = None
+            if isinstance(ind, dict):
+                ind_dict = {"kode": ind.get("kode"), "beskrivelse": ind.get("beskrivelse")}
+            elif ind:
+                ind_dict = {"kode": str(ind), "beskrivelse": None}
+
             locations.append({
+                "organisation_number": loc.get("organisation_number") or loc.get("organisasjonsnummer"),
                 "name": name,
-                "address": addr_line,
-                "postal_code": post_code,
-                "city": city,
+                "address": addr_line or None,
+                "postal_code": post_code or None,
+                "city": city or None,
                 "country": "Norge",
+                "industry": ind_dict,
+                "employees": loc.get("employees"),
+                "location_type": "subunit",
+                "is_headquarters": False,
                 "source": "official_subunit",
+                "source_url": locations_url,
+                "retrieved_at": locations_retrieved,
             })
 
-    # 2. Structured data (LocalBusiness, location)
+    # 2. Main registered business address (headquarters / registered office)
+    main_addr = profile.get("business_address") or profile.get("address")
+    if main_addr:
+        if isinstance(main_addr, dict):
+            raw_m_addr = main_addr.get("adresse") or main_addr.get("street") or []
+            m_addr_line = ", ".join(raw_m_addr) if isinstance(raw_m_addr, list) else str(raw_m_addr or "")
+            m_post_code = main_addr.get("postnummer") or main_addr.get("postal_code")
+            m_city = main_addr.get("poststed") or main_addr.get("city") or main_addr.get("kommune") or profile.get("municipality")
+        elif isinstance(main_addr, str) and main_addr.strip():
+            m_addr_line = main_addr.strip()
+            m_post_code = None
+            m_city = profile.get("municipality")
+        else:
+            m_addr_line = None
+            m_post_code = None
+            m_city = profile.get("municipality")
+
+        m_key = f"{normalize_legal_name(profile.get('name'))}|{normalize_legal_name(m_addr_line)}|{m_post_code or ''}|{m_city or ''}"
+        if m_key not in seen and (m_addr_line or m_city):
+            seen.add(m_key)
+            locations.insert(0, {
+                "organisation_number": profile.get("organisation_number"),
+                "name": profile.get("name"),
+                "address": m_addr_line or None,
+                "postal_code": m_post_code or None,
+                "city": m_city or None,
+                "country": "Norge",
+                "industry": {
+                    "kode": profile.get("industry_code"),
+                    "beskrivelse": profile.get("industry_label"),
+                } if profile.get("industry_code") else None,
+                "employees": profile.get("employees"),
+                "location_type": "registered_office",
+                "is_headquarters": True,
+                "source": "official_registry",
+                "source_url": registry_url,
+                "retrieved_at": registry_retrieved,
+            })
+
+    # 3. Structured data (LocalBusiness, location)
     if structured_data:
         local_biz = _walk_structured_data(
             structured_data.get("json-ld", []),
@@ -588,27 +666,44 @@ def extract_locations(
             city = addr.get("addressLocality") if isinstance(addr, dict) else None
             country = addr.get("addressCountry") if isinstance(addr, dict) else "Norge"
 
-            key = f"{normalize_legal_name(name)}|{normalize_legal_name(street)}|{post_code}"
+            key = f"{normalize_legal_name(name)}|{normalize_legal_name(street)}|{post_code or ''}|{city or ''}"
             if key not in seen and (name or street):
                 seen.add(key)
                 locations.append({
-                    "name": name,
+                    "organisation_number": profile.get("organisation_number"),
+                    "name": name or profile.get("name"),
                     "address": street,
                     "postal_code": post_code,
                     "city": city,
                     "country": country,
+                    "industry": None,
+                    "employees": None,
+                    "location_type": "website_location",
+                    "is_headquarters": False,
                     "source": "website_jsonld",
+                    "source_url": homepage_url,
+                    "retrieved_at": (evidence_dict.get("website") or {}).get("retrieved_at"),
                 })
 
-    # 3. Main address as primary location if none found
+    # 4. Main address fallback if no locations found at all
     if not locations and profile.get("municipality"):
         locations.append({
+            "organisation_number": profile.get("organisation_number"),
             "name": profile.get("name"),
             "address": None,
             "postal_code": None,
             "city": profile.get("municipality"),
             "country": "Norge",
+            "industry": {
+                "kode": profile.get("industry_code"),
+                "beskrivelse": profile.get("industry_label"),
+            } if profile.get("industry_code") else None,
+            "employees": profile.get("employees"),
+            "location_type": "registered_office",
+            "is_headquarters": True,
             "source": "official_registry",
+            "source_url": registry_url,
+            "retrieved_at": registry_retrieved,
         })
 
     if locations:
@@ -616,10 +711,10 @@ def extract_locations(
             field_name="locations",
             value=locations,
             status=FieldStatus.FOUND,
-            source_url=homepage_url or "https://data.brreg.no/enhetsregisteret/api/underenheter",
-            source_type="official_subunits_and_website",
+            source_url=locations_url if reg_locations else (homepage_url or registry_url),
+            source_type="official_subunits_and_website" if reg_locations else "official_registry",
             evidence_span=f"Extracted {len(locations)} verified company location(s)",
-            confidence=0.9,
+            confidence=0.95 if reg_locations else 0.85,
         )
 
     if not website_value and not reg_locations:
@@ -651,8 +746,12 @@ def extract_leadership(
     leadership: list[dict[str, Any]] = []
     seen: set[str] = set()
 
+    roles_ev = (profile.get("evidence") or {}).get("roles", {})
+    roles_url = roles_ev.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/enheter/{profile.get('organisation_number') or ''}/roller"
+    roles_retrieved = roles_ev.get("retrieved_at")
+
     # 1. Official BRREG roles (roller)
-    reg_roles = ((profile.get("evidence") or {}).get("roles", {}).get("value") or {}).get("roles") or []
+    reg_roles = (roles_ev.get("value") or {}).get("roles") or []
     for r in reg_roles:
         if r.get("inactive"):
             continue
@@ -669,7 +768,14 @@ def extract_leadership(
                 leadership.append({
                     "name": name,
                     "role": role_desc,
+                    "role_code": r.get("role_code"),
+                    "group": r.get("group"),
+                    "last_changed": r.get("last_changed"),
+                    "inactive": False,
+                    "organisation_number": r.get("organisation_number") or profile.get("organisation_number"),
                     "source": "official_roles",
+                    "source_url": roles_url,
+                    "retrieved_at": roles_retrieved,
                 })
 
     # 2. Structured data (founder, executiveDirector, officer)
@@ -694,11 +800,19 @@ def extract_leadership(
                                 leadership.append({
                                     "name": p_name,
                                     "role": p_role,
+                                    "role_code": None,
+                                    "group": "Website Leadership",
+                                    "last_changed": None,
+                                    "inactive": False,
+                                    "organisation_number": profile.get("organisation_number"),
                                     "source": "website_jsonld",
+                                    "source_url": homepage_url,
+                                    "retrieved_at": (profile.get("evidence") or {}).get("website", {}).get("retrieved_at"),
                                 })
 
     # 3. Website team / leadership page
     if website_value:
+        w_retrieved = website_value.get("retrieved_at") or (profile.get("evidence") or {}).get("website", {}).get("retrieved_at")
         for page in website_value.get("pages", []):
             p_url = str(page.get("url") or "").lower()
             if any(term in p_url for term in ("ledelse", "management", "team", "about", "om-oss")):
@@ -722,7 +836,14 @@ def extract_leadership(
                                 leadership.append({
                                     "name": l_name,
                                     "role": l_role,
+                                    "role_code": None,
+                                    "group": "Website Leadership",
+                                    "last_changed": None,
+                                    "inactive": False,
+                                    "organisation_number": profile.get("organisation_number"),
                                     "source": "website_team_page",
+                                    "source_url": p_url,
+                                    "retrieved_at": page.get("retrieved_at") or w_retrieved,
                                 })
 
     if leadership:
@@ -730,8 +851,8 @@ def extract_leadership(
             field_name="leadership",
             value=leadership,
             status=FieldStatus.FOUND,
-            source_url=homepage_url or "https://data.brreg.no/enhetsregisteret/api/enheter/roller",
-            source_type="official_roles_and_website",
+            source_url=roles_url if reg_roles else (homepage_url or "https://data.brreg.no/enhetsregisteret/api/enheter/roller"),
+            source_type="official_roles_and_website" if reg_roles else "company_website",
             evidence_span=f"Extracted {len(leadership)} verified leadership role(s)",
             confidence=0.95,
         )
@@ -749,9 +870,157 @@ def extract_leadership(
         field_name="leadership",
         value=[],
         status=FieldStatus.NOT_FOUND,
-        source_url=homepage_url,
+        source_url=homepage_url or roles_url,
         source_type="company_website",
         note="Inspected but no explicit leadership or executive positions identified",
+    )
+
+
+def extract_people(
+    profile: dict[str, Any],
+    website_value: dict[str, Any] | None,
+    structured_data: dict[str, Any],
+    homepage_url: str | None,
+) -> ExtractedField[list[dict[str, Any]]]:
+    """Extract people and roles preserving official BRREG statutory roles as authoritative."""
+    people: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    seen_official_names: set[str] = set()
+
+    roles_ev = (profile.get("evidence") or {}).get("roles", {})
+    roles_status = roles_ev.get("status")
+    roles_url = roles_ev.get("source_url") or f"https://data.brreg.no/enhetsregisteret/api/enheter/{profile.get('organisation_number') or ''}/roller"
+    roles_retrieved = roles_ev.get("retrieved_at")
+
+    # 1. Official BRREG roles (authoritative ground truth)
+    reg_roles = (roles_ev.get("value") or {}).get("roles") or []
+    for r in reg_roles:
+        name = r.get("name")
+        if not name:
+            continue
+        role_desc = r.get("role") or r.get("group") or "Registered role"
+        role_code = r.get("role_code")
+        group = r.get("group")
+        group_code = r.get("group_code")
+        last_changed = r.get("last_changed")
+        inactive = bool(r.get("inactive"))
+        org_nr = r.get("organisation_number") or profile.get("organisation_number")
+
+        key = f"{normalize_legal_name(name)}|{role_code or ''}|{normalize_legal_name(role_desc)}"
+        if key not in seen:
+            seen.add(key)
+            seen_official_names.add(normalize_legal_name(name))
+            people.append({
+                "name": name,
+                "role": role_desc,
+                "role_code": role_code,
+                "group": group,
+                "group_code": group_code,
+                "last_changed": last_changed,
+                "inactive": inactive,
+                "organisation_number": org_nr,
+                "source": "official_roles",
+                "source_url": roles_url,
+                "retrieved_at": roles_retrieved,
+            })
+
+    # 2. Enrich from structured data (founder, executiveDirector, officer) if not in official roles
+    if structured_data:
+        org_entities = _walk_structured_data(
+            structured_data.get("json-ld", []),
+            {"Organization", "Corporation"},
+        )
+        for org in org_entities:
+            for field_name, default_role in (("founder", "Founder"), ("foundingPerson", "Founder"), ("employee", None)):
+                persons = org.get(field_name) or []
+                if isinstance(persons, dict):
+                    persons = [persons]
+                for p in persons:
+                    if isinstance(p, dict) and p.get("name"):
+                        p_name = p.get("name")
+                        p_role = p.get("jobTitle") or default_role
+                        if p_name and normalize_legal_name(p_name) not in seen_official_names:
+                            key = f"{normalize_legal_name(p_name)}|{normalize_legal_name(p_role or '')}"
+                            if key not in seen:
+                                seen.add(key)
+                                people.append({
+                                    "name": p_name,
+                                    "role": p_role or "Team Member",
+                                    "role_code": None,
+                                    "group": "Website Organization",
+                                    "group_code": None,
+                                    "last_changed": None,
+                                    "inactive": False,
+                                    "organisation_number": profile.get("organisation_number"),
+                                    "source": "website_jsonld",
+                                    "source_url": homepage_url,
+                                    "retrieved_at": (profile.get("evidence") or {}).get("website", {}).get("retrieved_at"),
+                                })
+
+    # 3. Enrich from website leadership/team page if not in official roles
+    if website_value:
+        w_retrieved = website_value.get("retrieved_at") or (profile.get("evidence") or {}).get("website", {}).get("retrieved_at")
+        for page in website_value.get("pages", []):
+            p_url = str(page.get("url") or "")
+            if any(term in p_url.lower() for term in ("ledelse", "management", "team", "about", "om-oss")):
+                p_text = str(page.get("main_text_excerpt") or "")
+                for line in p_text.splitlines():
+                    line_clean = line.strip()
+                    for role_kw in (
+                        "daglig leder", "adm. dir", "administrerende direktør", "ceo",
+                        "chief executive officer", "styreleder", "styrets leder", "chair",
+                        "chairman", "board chair", "cfo", "cto", "gründer", "founder", "managing director",
+                    ):
+                        pattern = rf"^([A-ZÆØÅ][a-zæøå]+(?:\s+[A-ZÆØÅ][a-zæøå]+)+)[\s,:\-]+({re.escape(role_kw)})\b"
+                        match = re.search(pattern, line_clean, re.IGNORECASE)
+                        if match:
+                            l_name = match.group(1).strip()
+                            l_role = match.group(2).strip().title()
+                            if normalize_legal_name(l_name) not in seen_official_names:
+                                key = f"{normalize_legal_name(l_name)}|{normalize_legal_name(l_role)}"
+                                if key not in seen:
+                                    seen.add(key)
+                                    people.append({
+                                        "name": l_name,
+                                        "role": l_role,
+                                        "role_code": None,
+                                        "group": "Website Team",
+                                        "group_code": None,
+                                        "last_changed": None,
+                                        "inactive": False,
+                                        "organisation_number": profile.get("organisation_number"),
+                                        "source": "website_team_page",
+                                        "source_url": p_url,
+                                        "retrieved_at": page.get("retrieved_at") or w_retrieved,
+                                    })
+
+    if people:
+        return ExtractedField(
+            field_name="people",
+            value=people,
+            status=FieldStatus.FOUND,
+            source_url=roles_url if reg_roles else homepage_url,
+            source_type="official_roles" if reg_roles else "company_website",
+            evidence_span=f"Extracted {len(people)} verified person/role record(s)",
+            confidence=1.0 if reg_roles else 0.85,
+        )
+
+    if not website_value and (roles_status in {"unavailable", None} and not reg_roles):
+        return ExtractedField(
+            field_name="people",
+            value=None,
+            status=FieldStatus.UNAVAILABLE,
+            source_type="official_roles",
+            note="Official roles and website sources are unavailable",
+        )
+
+    return ExtractedField(
+        field_name="people",
+        value=[],
+        status=FieldStatus.NOT_FOUND,
+        source_url=roles_url if roles_status == "not_found" else homepage_url,
+        source_type="official_roles" if roles_status == "not_found" else "company_website",
+        note="Inspected but no registered roles or people identified",
     )
 
 
@@ -888,18 +1157,63 @@ def extract_careers(
         )
 
     pages = website_value.get("pages", [])
-    careers_page = next((p for p in pages if CAREERS_PATH.search(urllib.parse.urlparse(str(p.get("url") or "")).path)), None)
+    careers_page = next(
+        (
+            p for p in pages
+            if CAREERS_PATH.search(urllib.parse.urlparse(str(p.get("url") or "")).path)
+            or urllib.parse.urlparse(str(p.get("url") or "")).netloc.lower().startswith(("karriere.", "jobb."))
+        ),
+        None,
+    )
 
-    # Also inspect links or HTML if available
-    careers_url = str(careers_page.get("url") or "") if careers_page else None
+    # Collect outbound ATS links from verified company pages
+    ats_links: list[dict[str, Any]] = list(website_value.get("outbound_career_links") or [])
+    for p in pages:
+        for lk in (p.get("outbound_career_links") or []):
+            if not any(existing.get("url") == lk.get("url") for existing in ats_links):
+                ats_links.append(lk)
+
+    w_retrieved = (profile.get("evidence") or {}).get("website", {}).get("retrieved_at")
 
     if not careers_page:
-        # Check priority links or page text for career references
-        main_text = " ".join([str(website_value.get("main_text_excerpt") or ""), *[str(p.get("main_text_excerpt") or "") for p in pages]])
-        if re.search(r"\b(?:ledige\s+stillinger|karriere|work\s+with\s+us|jobb\s+hos\s+oss)\b", main_text, re.IGNORECASE):
+        # Check if an outbound ATS careers link is present on verified company pages
+        if ats_links:
+            best_ats = ats_links[0]
+            ats_url = best_ats["url"]
+            source_page = best_ats.get("source_url") or homepage_url
+            careers_data = {
+                "has_careers_page": True,
+                "careers_url": ats_url,
+                "ats_careers_url": ats_url,
+                "ats_platform": best_ats.get("platform"),
+                "hiring_active": None,  # Portal exists, but do NOT infer active hiring merely from ATS presence
+                "openings": [],
+                "source_url": source_page,
+                "retrieved_at": w_retrieved,
+            }
             return ExtractedField(
                 field_name="careers",
-                value={"has_careers_page": True, "careers_url": None, "hiring_active": None, "openings": []},
+                value=careers_data,
+                status=FieldStatus.FOUND,
+                source_url=source_page,
+                source_type="external_ats_link",
+                evidence_span=f"Outbound ATS careers link to {ats_url} ({best_ats.get('platform')})",
+                confidence=0.9,
+            )
+
+        # Check priority links or page text for career references
+        main_text = " ".join([str(website_value.get("main_text_excerpt") or ""), *[str(p.get("main_text_excerpt") or "") for p in pages]])
+        if re.search(r"\b(?:ledige\s+stillinger|karriere|work\s+with\s+us|jobb\s+hos\s+oss|jobbe\s+hos\s+oss|bli\s+en\s+av\s+oss|arbeide\s+hos\s+oss)\b", main_text, re.IGNORECASE):
+            return ExtractedField(
+                field_name="careers",
+                value={
+                    "has_careers_page": True,
+                    "careers_url": None,
+                    "hiring_active": None,
+                    "openings": [],
+                    "source_url": homepage_url,
+                    "retrieved_at": w_retrieved,
+                },
                 status=FieldStatus.FOUND,
                 source_url=homepage_url,
                 source_type="website_text",
@@ -908,7 +1222,14 @@ def extract_careers(
             )
         return ExtractedField(
             field_name="careers",
-            value={"has_careers_page": False, "careers_url": None, "hiring_active": False, "openings": []},
+            value={
+                "has_careers_page": False,
+                "careers_url": None,
+                "hiring_active": False,
+                "openings": [],
+                "source_url": homepage_url,
+                "retrieved_at": w_retrieved,
+            },
             status=FieldStatus.NOT_FOUND,
             source_url=homepage_url,
             source_type="company_website",
@@ -916,9 +1237,10 @@ def extract_careers(
         )
 
     # Analyze careers page text for active job postings
+    careers_url = str(careers_page.get("url") or "")
     careers_text = str(careers_page.get("main_text_excerpt") or "")
     openings: list[str] = []
-    hiring_active = False
+    hiring_active: bool | None = False
 
     # Check for active openings indicators vs "ingen ledige stillinger"
     if re.search(r"\bingen\s+ledige\s+stillinger\b|\bno\s+open\s+positions\b|\bcurrently\s+not\s+hiring\b", careers_text, re.IGNORECASE):
@@ -930,13 +1252,21 @@ def extract_careers(
             clean = line.strip()
             if 5 < len(clean) < 60 and any(clean.lower().startswith(prefix) for prefix in ("- ", "* ", "• ")):
                 openings.append(clean.lstrip("-*• "))
+    elif ats_links:
+        # Internal careers page links out to ATS, but does not state specific active openings in text
+        hiring_active = None
 
     careers_data = {
         "has_careers_page": True,
         "careers_url": careers_url,
         "hiring_active": hiring_active,
         "openings": openings[:10],
+        "source_url": careers_url,
+        "retrieved_at": careers_page.get("retrieved_at") or w_retrieved,
     }
+    if ats_links:
+        careers_data["ats_careers_url"] = ats_links[0]["url"]
+        careers_data["ats_platform"] = ats_links[0].get("platform")
 
     return ExtractedField(
         field_name="careers",
@@ -966,11 +1296,12 @@ def extract_news(
 
     news_items: list[dict[str, Any]] = []
     pages = website_value.get("pages", [])
+    w_retrieved = (profile.get("evidence") or {}).get("website", {}).get("retrieved_at")
 
     for page in pages:
         p_url = str(page.get("url") or "")
-        path = urllib.parse.urlparse(p_url).path
-        if NEWS_PATH.search(path):
+        parsed = urllib.parse.urlparse(p_url)
+        if NEWS_PATH.search(parsed.path) or parsed.netloc.lower().startswith(("news.", "nyheter.", "presse.")):
             title = str(page.get("title") or "Nyhet").strip()
             snippet = str(page.get("main_text_excerpt") or "").strip()[:300]
             # Try finding date in snippet or title (e.g. 2024-05-12, 12.05.2024)
@@ -983,6 +1314,8 @@ def extract_news(
                 "date": date_str,
                 "snippet": snippet,
                 "source": "website_news_page",
+                "source_url": p_url,
+                "retrieved_at": page.get("retrieved_at") or w_retrieved,
             })
 
     if news_items:
@@ -990,7 +1323,7 @@ def extract_news(
             field_name="news",
             value=news_items[:10],
             status=FieldStatus.FOUND,
-            source_url=homepage_url,
+            source_url=news_items[0]["url"] if len(news_items) == 1 else homepage_url,
             source_type="website_news_pages",
             evidence_span=f"Extracted {len(news_items)} news/press item(s)",
             confidence=0.9,
@@ -1423,6 +1756,7 @@ def extract_company_profile(
     contact_field = extract_contact(profile, website_value, structured_data, homepage_url)
     locations_field = extract_locations(profile, website_value, structured_data, homepage_url)
     leadership_field = extract_leadership(profile, website_value, structured_data, homepage_url)
+    people_field = extract_people(profile, website_value, structured_data, homepage_url)
     employees_field = extract_employees(profile, website_value, structured_data, homepage_url)
     careers_field = extract_careers(profile, website_value, homepage_url)
     news_field = extract_news(profile, website_value, homepage_url)
@@ -1454,4 +1788,5 @@ def extract_company_profile(
         customers_and_markets=customers_field,
         certifications=certifications_field,
         corporate_governance=governance_field,
+        people=people_field,
     )
