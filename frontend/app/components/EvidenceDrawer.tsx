@@ -1,6 +1,7 @@
 "use client";
 
 import { useState, useEffect, useRef } from "react";
+import { createPortal } from "react-dom";
 
 interface EvidenceRecord {
   field: string;
@@ -63,8 +64,10 @@ export function EvidenceDrawer({
 }: EvidenceDrawerProps) {
   const drawerRef = useRef<HTMLDivElement>(null);
   const [isVisible, setIsVisible] = useState(false);
+  const [mounted, setMounted] = useState(false);
 
   useEffect(() => {
+    setMounted(true);
     // Animate in
     requestAnimationFrame(() => setIsVisible(true));
 
@@ -83,7 +86,9 @@ export function EvidenceDrawer({
     ? verificationState(evidence.status)
     : { icon: "—", label: "Unavailable", className: "badge-neutral" };
 
-  return (
+  if (!mounted || typeof document === "undefined" || !document.body) return null;
+
+  return createPortal(
     <div
       role="dialog"
       aria-modal="true"
@@ -91,8 +96,12 @@ export function EvidenceDrawer({
       onClick={handleBackdropClick}
       style={{
         position: "fixed",
-        inset: 0,
-        zIndex: 200,
+        top: "var(--header-height, 56px)",
+        left: 0,
+        right: 0,
+        bottom: 0,
+        height: "calc(100vh - var(--header-height, 56px))",
+        zIndex: 100,
         display: "flex",
         justifyContent: "flex-end",
         background: isVisible ? "rgba(0, 0, 0, 0.5)" : "transparent",
@@ -107,14 +116,14 @@ export function EvidenceDrawer({
           background: "var(--bg-secondary)",
           borderLeft: "1px solid var(--border-default)",
           boxShadow: "var(--shadow-lg)",
-          overflowY: "auto",
-          transform: isVisible ? "translateX(0)" : "translateX(100%)",
-          transition: "transform 250ms cubic-bezier(0.4, 0, 0.2, 1)",
           display: "flex",
           flexDirection: "column",
+          overflow: "hidden",
+          transform: isVisible ? "translateX(0)" : "translateX(100%)",
+          transition: "transform 250ms cubic-bezier(0.4, 0, 0.2, 1)",
         }}
       >
-        {/* Header */}
+        {/* Header - Always visible at top of drawer */}
         <div
           style={{
             padding: "20px 24px",
@@ -123,6 +132,10 @@ export function EvidenceDrawer({
             alignItems: "center",
             justifyContent: "space-between",
             flexShrink: 0,
+            background: "var(--bg-secondary)",
+            position: "sticky",
+            top: 0,
+            zIndex: 10,
           }}
         >
           <h2
@@ -159,8 +172,15 @@ export function EvidenceDrawer({
           </button>
         </div>
 
-        {/* Content */}
-        <div style={{ padding: "24px", flex: 1 }}>
+        {/* Content - Scrolls internally when content is long */}
+        <div
+          style={{
+            padding: "24px",
+            flex: 1,
+            overflowY: "auto",
+            minHeight: 0,
+          }}
+        >
           {/* Fact being inspected */}
           <div style={{ marginBottom: "24px" }}>
             <div
@@ -315,7 +335,8 @@ export function EvidenceDrawer({
           )}
         </div>
       </div>
-    </div>
+    </div>,
+    document.body
   );
 }
 

@@ -45,6 +45,8 @@
   --transition-fast: 150ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-default: 250ms cubic-bezier(0.4, 0, 0.2, 1);
   --transition-slow: 400ms cubic-bezier(0.4, 0, 0.2, 1);
+
+  --header-height: 56px;
 }
 
 /* ─── Base ─── */
@@ -181,7 +183,7 @@ body {
 /* ─── Fade In ─── */
 @keyframes fadeIn {
   from { opacity: 0; transform: translateY(8px); }
-  to   { opacity: 1; transform: translateY(0); }
+  to   { opacity: 1; transform: none; }
 }
 .animate-in {
   animation: fadeIn 0.4s ease-out forwards;
