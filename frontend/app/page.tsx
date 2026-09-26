@@ -40,20 +40,7 @@ export default async function HomePage() {
 
       {/* ─── Company Table ─── */}
       <section style={{ marginTop: "40px" }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "space-between",
-            marginBottom: "16px",
-          }}
-        >
-          <h2 className="text-heading">Profiled Companies</h2>
-          <span className="text-caption">
-            {formatNumber(profiles.length)} total
-          </span>
-        </div>
-        <CompanyTable profiles={profiles.slice(0, 50)} />
+        <CompanyTable profiles={profiles} />
       </section>
     </div>
   );

@@ -1,6 +1,7 @@
 import { CompanyEnvelope, CompanyProfile, RunReport } from "./types";
 import * as fs from "fs";
 import * as path from "path";
+import * as child_process from "child_process";
 
 /**
  * Data loading utilities for the OrgTrace frontend.
@@ -65,10 +66,43 @@ function getEnvelopesLocal(): CompanyEnvelope[] {
 }
 
 function getProfilesLocal(): CompanyProfile[] {
-  if (!_localProfiles) {
+  if (!_localProfiles || _localProfiles.length === 0) {
+    // 1. Primary: read from out/profiles.jsonl
     _localProfiles = readJsonlFile<CompanyProfile>("profiles.jsonl");
+
+    // 2. Secondary fallback: extract directly from benchmark-data.tar.gz
+    if (!_localProfiles || _localProfiles.length === 0) {
+      try {
+        const tarPath = path.resolve(process.cwd(), "..", "data", "benchmark-data.tar.gz");
+        if (fs.existsSync(tarPath)) {
+          const stdout = child_process.execSync(`tar -xOzf "${tarPath}" profiles.jsonl`, {
+            maxBuffer: 30 * 1024 * 1024,
+            encoding: "utf-8",
+          });
+          _localProfiles = stdout
+            .split("\n")
+            .filter((line) => line.trim())
+            .map((line) => JSON.parse(line) as CompanyProfile);
+        }
+      } catch {
+        // ignore
+      }
+    }
+
+    // 3. Tertiary fallback: bundled fallback JSON
+    if (!_localProfiles || _localProfiles.length === 0) {
+      try {
+        const fallbackPath = path.resolve(process.cwd(), "app", "data", "profiles-fallback.json");
+        if (fs.existsSync(fallbackPath)) {
+          const content = fs.readFileSync(fallbackPath, "utf-8");
+          _localProfiles = JSON.parse(content) as CompanyProfile[];
+        }
+      } catch {
+        // ignore
+      }
+    }
   }
-  return _localProfiles;
+  return _localProfiles || [];
 }
 
 function getRunReportLocal(): RunReport | null {
@@ -194,13 +228,20 @@ export async function getDashboardStats(): Promise<DashboardStats> {
 }
 
 export async function getProfiles(): Promise<CompanyProfile[]> {
+  const local = getProfilesLocal();
+  if (local && local.length >= 1000) {
+    return local;
+  }
   if (API_BASE_URL) {
     const data = await fetchApi<{ results: CompanyProfile[]; total: number }>(
       "/api/companies?limit=100"
     );
-    if (data && Array.isArray(data.results)) return data.results;
+    if (data && Array.isArray(data.results)) {
+      if (local && local.length > data.results.length) return local;
+      return data.results;
+    }
   }
-  return getProfilesLocal();
+  return local;
 }
 
 export async function getEnvelopes(): Promise<CompanyEnvelope[]> {
@@ -211,13 +252,16 @@ export async function searchProfiles(
   query: string,
   limit: number = 50
 ): Promise<CompanyProfile[]> {
+  const local = searchProfilesLocal(query, limit);
+  if (local.length > 0) return local;
+
   if (API_BASE_URL) {
     const data = await fetchApi<{ results: CompanyProfile[]; total: number }>(
       `/api/companies?q=${encodeURIComponent(query)}&limit=${limit}`
     );
     if (data && Array.isArray(data.results)) return data.results;
   }
-  return searchProfilesLocal(query, limit);
+  return local;
 }
 
 export async function getProfileByOrgNumber(
