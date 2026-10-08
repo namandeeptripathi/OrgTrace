@@ -183,12 +183,21 @@ def main() -> None:
                     # No registry website — attempt discovery fallback if budget permits.
                     allowed, reason = guard.acquire_request(cost=0.005)
                     if allowed:
-                        with discovery_stats_lock:
-                            discovery_stats["attempts"] += 1
-                        search_results, search_op = brave_search(
-                            profile, brave_api_key,
-                            timeout=args.discovery_timeout, count=args.discovery_count,
-                        )
+                        with discovery_budget_lock:
+                            allow_discovery = discovery_budget_state["count"] < discovery_budget_limit
+                            if allow_discovery:
+                                discovery_budget_state["count"] += 1
+                        if not allow_discovery:
+                            allowed = False
+                        else:
+                            with discovery_stats_lock:
+                                discovery_stats["attempts"] += 1
+                        search_results, search_op = ([], {"bytes": 0, "latency_ms": 0})
+                        if allowed:
+                            search_results, search_op = brave_search(
+                                profile, brave_api_key,
+                                timeout=args.discovery_timeout, count=args.discovery_count,
+                            )
                         website_metrics["requests"] += 1
                         website_metrics["bytes"] += search_op.get("bytes", 0)
                         if search_op.get("latency_ms"):
@@ -197,6 +206,33 @@ def main() -> None:
                             discovery_stats["candidates_found"] += len(search_results)
                         decision = choose_search_candidate(profile, search_results)
                         selected = decision.get("selected")
+                        # One bounded retry with a different exact-entity query when
+                        # the first search misses a publishable company site.
+                        if not selected and allowed and guard.remaining_requests > 120:
+                            variants = build_company_search_queries(profile)
+                            first_query = variants[0] if variants else None
+                            for variant in variants[1:2]:
+                                if variant == first_query:
+                                    continue
+                                with discovery_budget_lock:
+                                    retry_allowed = discovery_budget_state["count"] < discovery_budget_limit
+                                    if retry_allowed:
+                                        discovery_budget_state["count"] += 1
+                                if not retry_allowed:
+                                    break
+                                retry_results, retry_op = brave_search(
+                                    profile, brave_api_key, timeout=args.discovery_timeout,
+                                    count=args.discovery_count, query=variant,
+                                )
+                                search_results.extend(retry_results)
+                                website_metrics["requests"] += 1
+                                website_metrics["bytes"] += retry_op.get("bytes", 0)
+                                if retry_op.get("latency_ms"):
+                                    website_metrics["latencies_ms"].append(retry_op["latency_ms"])
+                                decision = choose_search_candidate(profile, search_results)
+                                selected = decision.get("selected")
+                                if selected:
+                                    break
 
                         # Reuse the same public search response for recall signals.
                         enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
