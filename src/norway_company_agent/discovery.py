@@ -17,13 +17,21 @@ GENERIC_NAME_TOKENS = {"as", "asa", "ans", "da", "enk", "sa", "nuf", "company", 
 
 
 def build_company_search_query(profile: dict[str, Any]) -> str:
+    return build_company_search_queries(profile)[0]
+
+
+def build_company_search_queries(profile: dict[str, Any]) -> list[str]:
     name = " ".join(str(profile.get("name") or "").split())
     org = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
     municipality = " ".join(str(profile.get("municipality") or "").split())
     if not name or not org:
         raise ValueError("Company discovery requires a legal name and organisation number")
-    location = f" {municipality}" if municipality else ""
-    return f'"{name}" {org}{location}'
+    queries = [
+        f'"{name}" {org}' + (f" {municipality}" if municipality else "") ,
+        f'"{name}" "{org}" Norway official website',
+        f'"{name}"' + (f" {municipality}" if municipality else " Norway") + " official website",
+    ]
+    return list(dict.fromkeys(queries))
 
 
 def parse_brave_web_results(payload: dict[str, Any], *, query: str) -> list[dict[str, Any]]:
@@ -90,10 +98,10 @@ def score_search_candidate(profile: dict[str, Any], result: dict[str, Any]) -> d
         score += 0.1
         reasons.append("registry municipality appears in result snippet")
     score = min(score, 1.0)
-    # Registry/directory pages routinely reproduce both the legal name and org
-    # number. A candidate must therefore also have the distinctive company name
-    # in its hostname before it is worth crawling as a company-owned website.
-    publishable_candidate = score >= 0.75 and name_in_host and (org_match or all_name_tokens_in_title)
+    # Search engines often return legitimate company sites on neutral/generic
+    # hostnames. Host-name alignment is useful evidence but must not be a hard
+    # prerequisite; the fetched page still passes the existing exact-entity gate.
+    publishable_candidate = score >= 0.75 and (org_match or all_name_tokens_in_title)
     return {
         "status": "accepted_for_crawl" if publishable_candidate else "review" if score >= 0.6 else "rejected",
         "score": score,
