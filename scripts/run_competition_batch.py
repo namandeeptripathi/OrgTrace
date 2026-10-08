@@ -220,6 +220,9 @@ def main() -> None:
                                         discovery_budget_state["count"] += 1
                                 if not retry_allowed:
                                     break
+                                retry_token, _ = guard.acquire_request(cost=0.005)
+                                if not retry_token:
+                                    break
                                 retry_results, retry_op = brave_search(
                                     profile, brave_api_key, timeout=args.discovery_timeout,
                                     count=args.discovery_count, query=variant,
@@ -333,6 +336,10 @@ def main() -> None:
                     allow_enrichment = discovery_budget_state["count"] < discovery_budget_limit
                     if allow_enrichment:
                         discovery_budget_state["count"] += 1
+                if allow_enrichment:
+                    search_token, _ = guard.acquire_request(cost=0.005)
+                    if not search_token:
+                        allow_enrichment = False
                 if allow_enrichment:
                     try:
                         search_results, search_op = brave_search(profile, brave_api_key, timeout=args.discovery_timeout, count=args.discovery_count)
