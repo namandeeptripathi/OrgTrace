@@ -16,7 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from norway_company_agent.discovery import build_company_search_query, choose_search_candidate, parse_brave_web_results  # noqa: E402
+from norway_company_agent.discovery import build_company_search_query, build_company_search_queries, choose_search_candidate, parse_brave_web_results  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
 from norway_company_agent.website import fetch_website  # noqa: E402
@@ -37,8 +37,8 @@ def write_jsonl(path: Path, rows: list[dict]) -> None:
     temporary.replace(path)
 
 
-def brave_search(profile: dict, api_key: str, *, timeout: float, count: int) -> tuple[list[dict], dict]:
-    query = build_company_search_query(profile)
+def brave_search(profile: dict, api_key: str, *, timeout: float, count: int, query: str | None = None) -> tuple[list[dict], dict]:
+    query = query or build_company_search_query(profile)
     url = BRAVE_ENDPOINT + "?" + urllib.parse.urlencode({
         "q": query,
         "count": count,
