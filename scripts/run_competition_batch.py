@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import compute_profile_status, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
-from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
+from norway_company_agent.discovery import build_company_search_queries, choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.explanations import explain_company_profile  # noqa: E402
 from norway_company_agent.http import fetch_json  # noqa: E402
@@ -24,7 +24,8 @@ from norway_company_agent.identity import apply_website_identity_gate  # noqa: E
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.profile_extraction import extract_company_profile  # noqa: E402
 from norway_company_agent.resilience import CompetitionExecutionGuard, FailureCategory, classify_failure  # noqa: E402
-from norway_company_agent.website import fetch_website  # noqa: E402
+from norway_company_agent.website import fetch_website
+from norway_company_agent.search_enrichment import extract_search_enrichment  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
 
 
@@ -101,15 +102,17 @@ def main() -> None:
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
 
-    # Dynamic request budgeting: allocate budget across modules so roles never starves
-    # mandatory core registry financials or verified company websites.
+    # Dynamic request budgeting: reserve a bounded slice for recall discovery.
+    # Mandatory registry/financial/site verification keeps priority; optional roles
+    # share the remaining budget with discovery enrichment.
     if "roles" in fetch_modules:
         pending_count = len(pending_profiles)
         sites_count = sum(1 for p in pending_profiles if p.get("website"))
         financials_needed = pending_count if "financials" in fetch_modules else 0
         websites_needed = int(sites_count * 5.0) if "website" in requested_modules else 0
         safety_buffer = min(60, max(20, int(guard.max_requests * 0.03)))
-        available_for_roles = guard.max_requests - financials_needed - websites_needed - safety_buffer
+        discovery_reserve = min(150, max(60, int(guard.max_requests * 0.075)))
+        available_for_roles = guard.max_requests - financials_needed - websites_needed - safety_buffer - discovery_reserve
         max_roles_budget = max(0, min(pending_count, available_for_roles))
     else:
         max_roles_budget = 0
@@ -125,6 +128,9 @@ def main() -> None:
     eligible_for_roles = {p["organisation_number"] for p in sorted_for_roles[:max_roles_budget]}
     roles_budget_lock = threading.Lock()
     roles_budget_state = {"count": 0}
+    discovery_budget_lock = threading.Lock()
+    discovery_budget_state = {"count": 0}
+    discovery_budget_limit = min(150, max(60, int(guard.max_requests * 0.075)))
 
     discovery_stats_lock = threading.Lock()
     discovery_stats = {
@@ -175,7 +181,18 @@ def main() -> None:
                     profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
                 elif brave_api_key and not guard.is_reduced_mode():
                     # No registry website — attempt discovery fallback if budget permits.
-                    allowed, reason = guard.acquire_request(cost=0.005)
+                    allow_discovery = False
+                    with discovery_budget_lock:
+                        if discovery_budget_state["count"] < discovery_budget_limit:
+                            discovery_budget_state["count"] += 1
+                            allow_discovery = True
+
+                    if allow_discovery:
+                        allowed, reason = guard.acquire_request(cost=0.005)
+                    else:
+                        allowed, reason = False, "discovery_budget_limit_reached"
+
+                    search_results, search_op = ([], {"bytes": 0, "latency_ms": 0})
                     if allowed:
                         with discovery_stats_lock:
                             discovery_stats["attempts"] += 1
@@ -191,6 +208,72 @@ def main() -> None:
                             discovery_stats["candidates_found"] += len(search_results)
                         decision = choose_search_candidate(profile, search_results)
                         selected = decision.get("selected")
+                        # One bounded retry with a different exact-entity query when
+                        # the first search misses a publishable company site.
+                        if not selected and allowed and guard.remaining_requests > 120:
+                            variants = build_company_search_queries(profile)
+                            first_query = variants[0] if variants else None
+                            for variant in variants[1:2]:
+                                if variant == first_query:
+                                    continue
+                                with discovery_budget_lock:
+                                    retry_allowed = discovery_budget_state["count"] < discovery_budget_limit
+                                    if retry_allowed:
+                                        discovery_budget_state["count"] += 1
+                                if not retry_allowed:
+                                    break
+                                retry_token, _ = guard.acquire_request(cost=0.005)
+                                if not retry_token:
+                                    break
+                                retry_results, retry_op = brave_search(
+                                    profile, brave_api_key, timeout=args.discovery_timeout,
+                                    count=args.discovery_count, query=variant,
+                                )
+                                search_results.extend(retry_results)
+                                website_metrics["requests"] += 1
+                                website_metrics["bytes"] += retry_op.get("bytes", 0)
+                                if retry_op.get("latency_ms"):
+                                    website_metrics["latencies_ms"].append(retry_op["latency_ms"])
+                                decision = choose_search_candidate(profile, search_results)
+                                selected = decision.get("selected")
+                                if selected:
+                                    break
+
+                        # Reuse the same public search response for recall signals.
+                        enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
+                        if enrichment["social_profiles"]:
+                            profile["social_profiles"] = enrichment["social_profiles"]
+                            profile["social_presence"] = enrichment["social_profiles"]
+                            profile["social_links"] = enrichment["social_profiles"]
+                            profile["evidence"]["social_presence_search"] = evidence(
+                                "social_presence", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["social_profiles"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["social_profiles"]),
+                            )
+                        if enrichment["news"]:
+                            profile["public_activity_search"] = enrichment["news"]
+                            profile["news_search"] = enrichment["news"]
+                            profile["evidence"]["news_search"] = evidence(
+                                "news", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["news"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["news"]),
+                            )
+                        if enrichment["hiring"]:
+                            profile["hiring_search"] = enrichment["hiring"]
+                            profile["evidence"]["hiring_search"] = evidence(
+                                "careers", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["hiring"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["hiring"]),
+                            )
                         if selected:
                             with discovery_stats_lock:
                                 discovery_stats["candidates_crawled"] += 1
@@ -204,6 +287,8 @@ def main() -> None:
                             website["source_type"] = "search_discovered_company_website"
                             if assessment and assessment.get("publishable") and website.get("status") == "available":
                                 profile["evidence"]["website"] = website
+                                discovered_url = (website.get("value") or {}).get("final_url") or website.get("source_url") or selected["url"]
+                                profile["website"] = discovered_url
                                 with discovery_stats_lock:
                                     discovery_stats["candidates_accepted"] += 1
                             else:
@@ -246,15 +331,48 @@ def main() -> None:
                         content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                     )
 
+
             # Phase 2 & 6: Extract full profile domains from official & verified sources
             ext = extract_company_profile(profile)
             profile["people"] = [p for p in (ext.people.value or []) if not p.get("inactive")]
             profile["leadership"] = ext.leadership.value or []
             profile["locations"] = ext.locations.value or []
-            profile["jobs"] = ext.careers.to_dict()
-            profile["careers"] = ext.careers.to_dict()
-            profile["public_activity"] = ext.news.to_dict()
-            profile["news"] = ext.news.to_dict()
+            careers_data = ext.careers.to_dict()
+            hiring_search = profile.get("hiring_search") or []
+            if hiring_search:
+                current = careers_data.get("value")
+                if not isinstance(current, dict):
+                    current = {
+                        "has_careers_page": True,
+                        "careers_url": hiring_search[0].get("url"),
+                        "hiring_active": True if any(x.get("hiring_active") is True for x in hiring_search) else None,
+                        "openings": [],
+                        "source_url": hiring_search[0].get("source_url"),
+                        "retrieved_at": hiring_search[0].get("retrieved_at"),
+                    }
+                else:
+                    current = dict(current)
+                    if any(x.get("hiring_active") is True for x in hiring_search):
+                        current["hiring_active"] = True
+                    current["search_discovered_hiring"] = hiring_search
+                careers_data["value"] = current
+                careers_data["status"] = "found"
+                careers_data["source_type"] = "public_search"
+            profile["jobs"] = careers_data
+            profile["careers"] = careers_data
+
+            news_data = ext.news.to_dict()
+            search_news = profile.get("news_search") or []
+            if search_news:
+                existing_news = list(news_data.get("value") or [])
+                existing_urls = {item.get("url") for item in existing_news if isinstance(item, dict)}
+                merged_news = existing_news + [item for item in search_news if item.get("url") not in existing_urls]
+                news_data["value"] = merged_news[:10]
+                news_data["status"] = "found"
+                news_data["source_type"] = "website_and_public_search"
+                news_data["source_url"] = search_news[0].get("source_url") or news_data.get("source_url")
+            profile["public_activity"] = news_data
+            profile["news"] = news_data
             profile["products_and_services"] = ext.products_and_services.to_dict()
             profile["customers_and_markets"] = ext.customers_and_markets.to_dict()
             profile["certifications"] = ext.certifications.to_dict()
@@ -264,6 +382,28 @@ def main() -> None:
             profile["contact_extracted"] = ext.contact.to_dict()
             profile["employees_extracted"] = ext.employees.to_dict()
             profile["extracted_profile"] = ext.to_dict()
+
+            if ext.description.value:
+                profile.setdefault("description", ext.description.value)
+            if ext.contact.value:
+                profile.setdefault("contact", ext.contact.value)
+                if ext.contact.value.get("email"):
+                    profile.setdefault("email", ext.contact.value["email"])
+                if ext.contact.value.get("phone"):
+                    profile.setdefault("phone", ext.contact.value["phone"])
+                if ext.contact.value.get("address"):
+                    profile.setdefault("address", ext.contact.value["address"])
+            if ext.industry.value:
+                profile.setdefault("industry", ext.industry.value)
+            if ext.employees.value is not None:
+                profile.setdefault("employees", ext.employees.value)
+
+            # Sync social links from website evidence if not already set
+            if not profile.get("social_presence"):
+                website_val = (profile.get("evidence", {}).get("website") or {}).get("value") or {}
+                if website_val.get("social_links"):
+                    profile["social_presence"] = website_val["social_links"]
+                    profile["social_links"] = website_val["social_links"]
 
             actual_official_requests = sum(1 for item in metrics if item.status > 0)
             metric = {

@@ -1435,73 +1435,73 @@ def build_unified_company_profile(
     # 23. NEWS & EVENTS
     # ------------------------------------------------------------------------
     news_field = extracted_profile.news if extracted_profile else None
+    search_news = evidence_dict.get("news_search") or {}
+    search_news_value = search_news.get("value") or []
     if news_field and news_field.status == FieldStatus.FOUND and news_field.value:
+        news_value = news_field.value
+        news_source = news_field.source_url
+        news_type = news_field.source_type
+        news_conf = news_field.confidence
+    elif search_news.get("status") == "available" and search_news_value:
+        news_value = search_news_value
+        news_source = search_news.get("source_url")
+        news_type = "public_search"
+        news_conf = search_news.get("confidence") or 0.85
+    else:
+        news_value = []
+        news_source = norm_website
+        news_type = "company_website"
+        news_conf = 0.0
+    if news_value:
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
-            category=CoverageCategory.NEWS_EVENTS,
-            field_name="news_events",
-            value=news_field.value,
-            normalized_value=[n.get("title") for n in news_field.value if isinstance(n, dict)],
-            status=CoverageFieldStatus.AVAILABLE,
-            source_url=news_field.source_url,
-            source_type=news_field.source_type,
-            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=news_field.evidence_span,
-            confidence=news_field.confidence,
+            category=CoverageCategory.NEWS_EVENTS, field_name="news_events",
+            value=news_value,
+            normalized_value=[n.get("title") for n in news_value if isinstance(n, dict)],
+            status=CoverageFieldStatus.AVAILABLE, source_url=news_source,
+            source_type=news_type,
+            source_priority=SourcePriority.FIRST_PARTY_WEBSITE if news_type != "public_search" else SourcePriority.REPUTABLE_SECONDARY,
+            evidence_span=f"Extracted {len(news_value)} dated public news item(s)",
+            confidence=news_conf,
         )
     else:
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
-            category=CoverageCategory.NEWS_EVENTS,
-            field_name="news_events",
-            value=[],
+            category=CoverageCategory.NEWS_EVENTS, field_name="news_events", value=[],
             normalized_value=[],
             status=CoverageFieldStatus.NOT_FOUND if norm_website else CoverageFieldStatus.UNAVAILABLE,
-            source_url=norm_website,
-            source_type="company_website",
-            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=None,
-            confidence=0.0,
+            source_url=news_source, source_type=news_type,
+            source_priority=SourcePriority.FIRST_PARTY_WEBSITE, evidence_span=None, confidence=0.0,
         )
 
     # ------------------------------------------------------------------------
     # 24. SOCIAL / COMPANY PRESENCE
     # ------------------------------------------------------------------------
-    social_urls: list[str] = []
-    if norm_website:
-        # Check careers or links
-        careers_field = extracted_profile.careers if extracted_profile else None
-        if careers_field and careers_field.status == FieldStatus.FOUND and careers_field.value:
-            c_url = careers_field.value.get("careers_url")
-            if c_url:
-                social_urls.append(c_url)
-
+    social_rec = evidence_dict.get("social_presence_search") or {}
+    social_urls = []
+    if social_rec.get("status") == "available":
+        social_urls = [item.get("url") for item in (social_rec.get("value") or []) if isinstance(item, dict) and item.get("url")]
+    if not social_urls and norm_website:
+        website_value = website_rec.get("value") or {}
+        social_urls = [item.get("url") for item in (website_value.get("social_links") or []) if isinstance(item, dict) and item.get("url")]
     if social_urls:
         facts[CoverageCategory.SOCIAL_PRESENCE] = CoverageFact(
-            category=CoverageCategory.SOCIAL_PRESENCE,
-            field_name="social_presence",
-            value=social_urls,
-            normalized_value=social_urls,
+            category=CoverageCategory.SOCIAL_PRESENCE, field_name="social_presence",
+            value=social_urls, normalized_value=social_urls,
             status=CoverageFieldStatus.AVAILABLE,
-            source_url=norm_website,
-            source_type="first_party_website",
-            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=f"Public web channels: {', '.join(social_urls)}",
-            confidence=0.9,
+            source_url=social_rec.get("source_url") or norm_website,
+            source_type="public_search" if social_rec.get("status") == "available" else "first_party_website",
+            source_priority=SourcePriority.REPUTABLE_SECONDARY if social_rec.get("status") == "available" else SourcePriority.FIRST_PARTY_WEBSITE,
+            evidence_span=f"Verified public social channels: {', '.join(social_urls)}",
+            confidence=social_rec.get("confidence") or 0.9,
         )
     else:
         facts[CoverageCategory.SOCIAL_PRESENCE] = CoverageFact(
-            category=CoverageCategory.SOCIAL_PRESENCE,
-            field_name="social_presence",
-            value=[],
+            category=CoverageCategory.SOCIAL_PRESENCE, field_name="social_presence", value=[],
             normalized_value=[],
             status=CoverageFieldStatus.NOT_FOUND if norm_website else CoverageFieldStatus.UNAVAILABLE,
-            source_url=norm_website,
-            source_type="first_party_website",
-            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=None,
-            confidence=0.0,
+            source_url=norm_website, source_type="first_party_website",
+            source_priority=SourcePriority.FIRST_PARTY_WEBSITE, evidence_span=None, confidence=0.0,
         )
 
-    # ------------------------------------------------------------------------
     # 25. CERTIFICATIONS
     # ------------------------------------------------------------------------
     cert_field = getattr(extracted_profile, "certifications", None)
