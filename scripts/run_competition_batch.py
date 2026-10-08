@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import compute_profile_status, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
-from norway_company_agent.discovery import choose_search_candidate  # noqa: E402
+from norway_company_agent.discovery import build_company_search_queries, choose_search_candidate  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.explanations import explain_company_profile  # noqa: E402
 from norway_company_agent.http import fetch_json  # noqa: E402
@@ -24,7 +24,8 @@ from norway_company_agent.identity import apply_website_identity_gate  # noqa: E
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
 from norway_company_agent.profile_extraction import extract_company_profile  # noqa: E402
 from norway_company_agent.resilience import CompetitionExecutionGuard, FailureCategory, classify_failure  # noqa: E402
-from norway_company_agent.website import fetch_website  # noqa: E402
+from norway_company_agent.website import fetch_website
+from norway_company_agent.search_enrichment import extract_search_enrichment  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
 
 
@@ -191,6 +192,40 @@ def main() -> None:
                             discovery_stats["candidates_found"] += len(search_results)
                         decision = choose_search_candidate(profile, search_results)
                         selected = decision.get("selected")
+
+                        # Reuse the same public search response for recall signals.
+                        enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
+                        if enrichment["social_profiles"]:
+                            profile["social_profiles"] = enrichment["social_profiles"]
+                            profile["evidence"]["social_presence_search"] = evidence(
+                                "social_presence", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["social_profiles"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["social_profiles"]),
+                            )
+                        if enrichment["news"]:
+                            profile["public_activity_search"] = enrichment["news"]
+                            profile["news_search"] = enrichment["news"]
+                            profile["evidence"]["news_search"] = evidence(
+                                "news", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["news"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["news"]),
+                            )
+                        if enrichment["hiring"]:
+                            profile["hiring_search"] = enrichment["hiring"]
+                            profile["evidence"]["hiring_search"] = evidence(
+                                "careers", "available", "public_search",
+                                "https://api.search.brave.com/res/v1/web/search",
+                                value=enrichment["hiring"],
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"), identity_match=True,
+                                confidence=max(x.get("confidence", 0.0) for x in enrichment["hiring"]),
+                            )
                         if selected:
                             with discovery_stats_lock:
                                 discovery_stats["candidates_crawled"] += 1
