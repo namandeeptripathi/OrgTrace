@@ -359,10 +359,42 @@ def main() -> None:
             profile["people"] = [p for p in (ext.people.value or []) if not p.get("inactive")]
             profile["leadership"] = ext.leadership.value or []
             profile["locations"] = ext.locations.value or []
-            profile["jobs"] = ext.careers.to_dict()
-            profile["careers"] = ext.careers.to_dict()
-            profile["public_activity"] = ext.news.to_dict()
-            profile["news"] = ext.news.to_dict()
+            careers_data = ext.careers.to_dict()
+            hiring_search = profile.get("hiring_search") or []
+            if hiring_search:
+                current = careers_data.get("value")
+                if not isinstance(current, dict):
+                    current = {
+                        "has_careers_page": True,
+                        "careers_url": hiring_search[0].get("url"),
+                        "hiring_active": True if any(x.get("hiring_active") is True for x in hiring_search) else None,
+                        "openings": [],
+                        "source_url": hiring_search[0].get("source_url"),
+                        "retrieved_at": hiring_search[0].get("retrieved_at"),
+                    }
+                else:
+                    current = dict(current)
+                    if any(x.get("hiring_active") is True for x in hiring_search):
+                        current["hiring_active"] = True
+                    current["search_discovered_hiring"] = hiring_search
+                careers_data["value"] = current
+                careers_data["status"] = "found"
+                careers_data["source_type"] = "public_search"
+            profile["jobs"] = careers_data
+            profile["careers"] = careers_data
+
+            news_data = ext.news.to_dict()
+            search_news = profile.get("news_search") or []
+            if search_news:
+                existing_news = list(news_data.get("value") or [])
+                existing_urls = {item.get("url") for item in existing_news if isinstance(item, dict)}
+                merged_news = existing_news + [item for item in search_news if item.get("url") not in existing_urls]
+                news_data["value"] = merged_news[:10]
+                news_data["status"] = "found"
+                news_data["source_type"] = "website_and_public_search"
+                news_data["source_url"] = search_news[0].get("source_url") or news_data.get("source_url")
+            profile["public_activity"] = news_data
+            profile["news"] = news_data
             profile["products_and_services"] = ext.products_and_services.to_dict()
             profile["customers_and_markets"] = ext.customers_and_markets.to_dict()
             profile["certifications"] = ext.certifications.to_dict()
