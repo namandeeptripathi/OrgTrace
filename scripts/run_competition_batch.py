@@ -102,15 +102,17 @@ def main() -> None:
         resumed_profiles = len(state)
     pending_profiles = [profile for profile in profiles if profile["organisation_number"] not in state]
 
-    # Dynamic request budgeting: allocate budget across modules so roles never starves
-    # mandatory core registry financials or verified company websites.
+    # Dynamic request budgeting: reserve a bounded slice for recall discovery.
+    # Mandatory registry/financial/site verification keeps priority; optional roles
+    # share the remaining budget with discovery enrichment.
     if "roles" in fetch_modules:
         pending_count = len(pending_profiles)
         sites_count = sum(1 for p in pending_profiles if p.get("website"))
         financials_needed = pending_count if "financials" in fetch_modules else 0
         websites_needed = int(sites_count * 5.0) if "website" in requested_modules else 0
         safety_buffer = min(60, max(20, int(guard.max_requests * 0.03)))
-        available_for_roles = guard.max_requests - financials_needed - websites_needed - safety_buffer
+        discovery_reserve = min(150, max(60, int(guard.max_requests * 0.075)))
+        available_for_roles = guard.max_requests - financials_needed - websites_needed - safety_buffer - discovery_reserve
         max_roles_budget = max(0, min(pending_count, available_for_roles))
     else:
         max_roles_budget = 0
@@ -126,6 +128,9 @@ def main() -> None:
     eligible_for_roles = {p["organisation_number"] for p in sorted_for_roles[:max_roles_budget]}
     roles_budget_lock = threading.Lock()
     roles_budget_state = {"count": 0}
+    discovery_budget_lock = threading.Lock()
+    discovery_budget_state = {"count": 0}
+    discovery_budget_limit = min(150, max(60, int(guard.max_requests * 0.075)))
 
     discovery_stats_lock = threading.Lock()
     discovery_stats = {
@@ -280,6 +285,38 @@ def main() -> None:
                         note=note,
                         content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                     )
+
+            # Bounded recall enrichment for verified companies. Reuse one search response.
+            if (
+                brave_api_key
+                and not guard.is_reduced_mode()
+                and profile.get("evidence", {}).get("website", {}).get("status") == "available"
+                and not profile.get("evidence", {}).get("social_presence_search")
+            ):
+                with discovery_budget_lock:
+                    allow_enrichment = discovery_budget_state["count"] < discovery_budget_limit
+                    if allow_enrichment:
+                        discovery_budget_state["count"] += 1
+                if allow_enrichment:
+                    try:
+                        search_results, search_op = brave_search(profile, brave_api_key, timeout=args.discovery_timeout, count=args.discovery_count)
+                        website_metrics["requests"] += 1
+                        website_metrics["bytes"] += search_op.get("bytes", 0)
+                        if search_op.get("latency_ms"):
+                            website_metrics["latencies_ms"].append(search_op["latency_ms"])
+                        enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
+                        if enrichment["social_profiles"]:
+                            profile["social_profiles"] = enrichment["social_profiles"]
+                            profile["evidence"]["social_presence_search"] = evidence("social_presence", "available", "public_search", "https://api.search.brave.com/res/v1/web/search", value=enrichment["social_profiles"], organisation_number=profile["organisation_number"], company_name=profile.get("name"), identity_match=True, confidence=max(x.get("confidence", 0.0) for x in enrichment["social_profiles"]))
+                        if enrichment["news"]:
+                            profile["public_activity_search"] = enrichment["news"]
+                            profile["news_search"] = enrichment["news"]
+                            profile["evidence"]["news_search"] = evidence("news", "available", "public_search", "https://api.search.brave.com/res/v1/web/search", value=enrichment["news"], organisation_number=profile["organisation_number"], company_name=profile.get("name"), identity_match=True, confidence=max(x.get("confidence", 0.0) for x in enrichment["news"]))
+                        if enrichment["hiring"]:
+                            profile["hiring_search"] = enrichment["hiring"]
+                            profile["evidence"]["hiring_search"] = evidence("careers", "available", "public_search", "https://api.search.brave.com/res/v1/web/search", value=enrichment["hiring"], organisation_number=profile["organisation_number"], company_name=profile.get("name"), identity_match=True, confidence=max(x.get("confidence", 0.0) for x in enrichment["hiring"]))
+                    except Exception:
+                        pass
 
             # Phase 2 & 6: Extract full profile domains from official & verified sources
             ext = extract_company_profile(profile)
