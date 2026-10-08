@@ -267,8 +267,12 @@ def normalize_social_url(url: str) -> dict[str, str] | None:
     }
     if not parts or lowered[0] in rejected_first.get(platform, set()):
         return None
-    if platform == "facebook" and lowered[0] == "profile.php":
-        return None
+    if platform == "instagram":
+        if len(parts) != 1 or any(p in {"p", "reel", "reels", "stories", "explore"} for p in lowered):
+            return None
+    if platform == "facebook":
+        if any(p in {"sharer", "sharer.php", "share.php", "dialog", "policy.php", "privacy", "events", "groups", "plugins", "profile.php"} for p in lowered):
+            return None
     if platform == "linkedin" and (lowered[0] != "company" or len(parts) < 2):
         return None
     if platform == "youtube" and lowered[0] not in {"channel", "user", "c"} and not parts[0].startswith("@"):

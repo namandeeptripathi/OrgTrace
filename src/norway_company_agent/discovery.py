@@ -47,6 +47,8 @@ def parse_brave_web_results(payload: dict[str, Any], *, query: str) -> list[dict
             "rank": rank,
             "provider": "brave_search_api",
             "query": query,
+            "page_age": result.get("page_age") or result.get("age"),
+            "result_kind": result.get("result_kind"),
         })
     return parsed
 
@@ -75,6 +77,18 @@ def score_search_candidate(profile: dict[str, Any], result: dict[str, Any]) -> d
     evidence_digits = re.sub(r"\D", "", f"{result.get('title', '')} {result.get('snippet', '')}")
     municipality_tokens = set(_tokens(profile.get("municipality")))
 
+    # Reject candidates where snippet explicitly cites a DIFFERENT 9-digit Norwegian org number
+    found_orgs = re.findall(r"\b\d{9}\b", f"{result.get('title', '')} {result.get('snippet', '')}")
+    if found_orgs and all(cand != org for cand in found_orgs):
+        return {
+            "status": "rejected",
+            "score": 0.0,
+            "publishable_candidate": False,
+            "url": normalized,
+            "host": host,
+            "reasons": ["conflicting organisation number in search evidence"],
+        }
+
     org_match = bool(org and org in evidence_digits)
     all_name_tokens = bool(name_tokens and set(name_tokens).issubset(evidence_tokens))
     all_name_tokens_in_title = bool(name_tokens and set(name_tokens).issubset(set(title_tokens)))
@@ -98,10 +112,26 @@ def score_search_candidate(profile: dict[str, Any], result: dict[str, Any]) -> d
         score += 0.1
         reasons.append("registry municipality appears in result snippet")
     score = min(score, 1.0)
-    # Search engines often return legitimate company sites on neutral/generic
-    # hostnames. Host-name alignment is useful evidence but must not be a hard
-    # prerequisite; the fetched page still passes the existing exact-entity gate.
-    publishable_candidate = score >= 0.75 and (org_match or all_name_tokens_in_title)
+    path = urllib.parse.urlparse(normalized).path.casefold()
+    is_directory_path = any(
+        path.startswith(prefix)
+        for prefix in ("/selskap/", "/bedrift/", "/foretak/", "/firma/", "/enhet/", "/enheter/", "/virksomhet/", "/company/", "/companies/")
+    )
+    if is_directory_path:
+        return {
+            "status": "rejected",
+            "score": 0.0,
+            "publishable_candidate": False,
+            "url": normalized,
+            "host": host,
+            "reasons": ["directory path structure indicates company directory, not company website"],
+        }
+
+    # Registry/directory pages routinely reproduce both the legal name and org
+    # number. A candidate must therefore also have distinctive company name
+    # tokens in its hostname before it is worth crawling as a company-owned website.
+    name_in_host = bool(name_compact and name_compact in host_compact or any(len(t) >= 4 and t in host_compact for t in name_tokens))
+    publishable_candidate = score >= 0.75 and name_in_host and (org_match or all_name_tokens_in_title)
     return {
         "status": "accepted_for_crawl" if publishable_candidate else "review" if score >= 0.6 else "rejected",
         "score": score,

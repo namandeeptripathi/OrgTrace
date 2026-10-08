@@ -324,9 +324,34 @@ def terminal_envelope(
     entity_state = "submission_error" if any(item["state"] == "submission_error" for item in module_states.values()) else "complete"
     profile_status = profile.get("status") or compute_profile_status(profile)
     profile["status"] = profile_status
+
+    from .coverage import build_unified_company_profile
+    contract = build_unified_company_profile(profile).to_contract_envelope(run_id=run_id)
+
+    run_meta = {
+        "run_id": run_id,
+        "started_at": started_at,
+        "completed_at": completed_at,
+        "terminal_status": entity_state,
+    }
+
+    run_metrics = profile.get("run_metrics") or {}
+    latencies = run_metrics.get("latencies_ms") or []
+    operations = {
+        "requests": int(run_metrics.get("requests") or contract.get("operations", {}).get("requests", 0)),
+        "runtime_ms": int(sum(latencies) if latencies else contract.get("operations", {}).get("runtime_ms", 0)),
+        "third_party_cost_usd": float(contract.get("operations", {}).get("third_party_cost_usd", 0.0)),
+    }
+
     return {
         "run_id": run_id,
         "organisation_number": profile["organisation_number"],
+        "run": run_meta,
+        "claims": contract.get("claims", []),
+        "evidence": contract.get("evidence", []),
+        "changes": profile.get("change_intelligence", {}).get("changes") or contract.get("changes", []),
+        "errors": profile.get("errors") or contract.get("errors", []),
+        "operations": operations,
         "state": entity_state,
         "status": profile_status,
         "started_at": started_at,
