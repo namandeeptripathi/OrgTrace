@@ -331,6 +331,25 @@ npm run dev
 
 ---
 
+## Competition Reproducibility (Key-Free Public-Source Run)
+
+**Entry name:** OrgTrace  
+**Current main commit:** `674dec2a829b2ad333c74272f55dc2798937c860`  
+**Reproducible public-source batch command:**
+
+```bash
+git clone https://github.com/namandeeptripathi/OrgTrace.git
+cd OrgTrace
+uv sync
+./scripts/run_competition.sh smoke
+```
+
+This runs the tracked 10-company cohort at `data/smoke-companies.jsonl` using the public Brønnøysundregistrene APIs. It does not require a Brave Search API key or any other paid API key. Outputs are written to `out/smoke-envelopes.jsonl`, `out/smoke-profiles.jsonl`, and `out/smoke-report.json`.
+
+**Important scope note:** `./scripts/run_competition.sh full` is the 1,000-company benchmark command, but it requires `entry-companies.jsonl` or `signalpost-universe.jsonl.gz`. Those competition-cohort inputs are not tracked in this public repository. Do not treat the full command as a clean-checkout, key-free reproduction unless the cohort file has been supplied separately. The public smoke command above is the reproducible command available directly from this repository.
+
+---
+
 ## 13. Competition Execution Commands
 
 OrgTrace provides a unified, executable runner script [`scripts/run_competition.sh`](scripts/run_competition.sh):
