@@ -30,12 +30,12 @@ The benchmark was executed against an exact, deterministic, and fully reproducib
 
 ### 2.1 Dataset Provenance & Integrity
 
-- **Input Manifest Source**: [`entry-companies.jsonl`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/entry-companies.jsonl)
-- **Upstream Universe Archive**: [`signalpost-universe.jsonl.gz`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/signalpost-universe.jsonl.gz)
+- **Input Manifest Source**: [`entry-companies.jsonl`](../entry-companies.jsonl)
+- **Upstream Universe Archive**: [`signalpost-universe.jsonl.gz`](../signalpost-universe.jsonl.gz)
 - **Universe SHA-256**: `cf2cfdbb5c21ee4bb912df0f653459c25da7d2644265538e12cbfe0bc02c1181`
-- **Canonical Registry Snapshot**: [`brreg-enheter.csv`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/brreg-enheter.csv) (154.7 MB, 1,156,379 rows scanned)
+- **Canonical Registry Snapshot**: [`brreg-enheter.csv`](../brreg-enheter.csv) (154.7 MB, 1,156,379 rows scanned)
 - **Registry Snapshot SHA-256**: `5392f7a9b625594fdbd7aa21bbf2badc18201f0ec8956930bf47e3245166a455`
-- **Selection Tool**: [`select_entry_batch.py`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/select_entry_batch.py)
+- **Selection Tool**: [`select_entry_batch.py`](../select_entry_batch.py)
 - **Selection PRNG Seed**: `20260823` (`random.Random(20260823).sample(universe, 1000)`)
 
 ### 2.2 Input Verification Metrics
@@ -73,7 +73,7 @@ The sample contains a realistic distribution across Norwegian business structure
 
 ## 3. Pipeline Architecture & Execution Configuration
 
-The benchmark was executed using the actual production batch pipeline ([`scripts/run_competition_batch.py`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/scripts/run_competition_batch.py)), exercising all active core modules simultaneously.
+The benchmark was executed using the actual production batch pipeline ([`scripts/run_competition_batch.py`](../scripts/run_competition_batch.py)), exercising all active core modules simultaneously.
 
 ```
                                  ┌──────────────────────────────────────────────┐
@@ -126,11 +126,11 @@ The benchmark was executed using the actual production batch pipeline ([`scripts
 
 ### 3.1 Active Pipeline Modules
 1. **`registry`**: Extracts official legal identity, organization number, status, municipality, and NACE industry code from the canonical 1.15M-row Brreg snapshot.
-2. **`accounting_obligation`**: Applies the official statutory ruleset ([`ACCOUNTING_RULESET_VERSION`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/src/norway_company_agent/official.py#L11)) mapping legal forms (`AS`, `BRL`, etc.) and filing years to legal obligations.
-3. **`website`**: For all companies with website claims, performs live HTTP fetch, robots.txt verification, HTML parsing, social link extraction, contact details extraction, and executes [`apply_website_identity_gate`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/src/norway_company_agent/identity.py) for identity disambiguation.
+2. **`accounting_obligation`**: Applies the official statutory ruleset ([`ACCOUNTING_RULESET_VERSION`](../src/norway_company_agent/official.py#L11)) mapping legal forms (`AS`, `BRL`, etc.) and filing years to legal obligations.
+3. **`website`**: For all companies with website claims, performs live HTTP fetch, robots.txt verification, HTML parsing, social link extraction, contact details extraction, and executes [`apply_website_identity_gate`](../src/norway_company_agent/identity.py) for identity disambiguation.
 4. **`financials`**: Issues live HTTP queries against Brreg Regnskapsregisteret open API (`data.brreg.no/regnskapsregisteret/regnskap/{org}`) to retrieve annual account filings, operating results, revenue, equity, and debt.
-5. **`change_intelligence`**: Executes [`analyze_profile_changes`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/src/norway_company_agent/change_intelligence.py) on all 1,000 profiles to track baseline observation state and material changes.
-6. **`explanations`**: Generates evidence-grounded natural language explanations for every company profile via [`explain_company_profile`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/src/norway_company_agent/explanations.py).
+5. **`change_intelligence`**: Executes [`analyze_profile_changes`](../src/norway_company_agent/change_intelligence.py) on all 1,000 profiles to track baseline observation state and material changes.
+6. **`explanations`**: Generates evidence-grounded natural language explanations for every company profile via [`explain_company_profile`](../src/norway_company_agent/explanations.py).
 
 ### 3.2 Configuration Details
 - **Intentionally Disabled External Search**: Brave Search discovery was intentionally skipped because `BRAVE_SEARCH_API_KEY` was not provided in this clean evaluation run. Profiles without registry websites recorded deterministically gated `not_found` evidence without consuming budget.
@@ -316,7 +316,7 @@ The actual information coverage was measured across the entire 1,000-profile run
 
 ## 8. Terminal Envelope & Competition Contract Validation
 
-All 1,000 output envelopes in [`out/envelopes.jsonl`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/out/envelopes.jsonl) were audited against the official competition validation contract ([`validate_envelopes`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/src/norway_company_agent/batch.py#L262)):
+All 1,000 output envelopes in [`out/envelopes.jsonl`](../out/envelopes.jsonl) were audited against the official competition validation contract ([`validate_envelopes`](../src/norway_company_agent/batch.py)):
 
 ```json
 {
@@ -345,11 +345,11 @@ All 1,000 output envelopes in [`out/envelopes.jsonl`](file:///Users/apple/Deskto
 
 To reproduce every number in this benchmark report from a clean shell:
 
-### Step 1: Run the Official Test Suite (390 Tests)
+### Step 1: Run the Official Test Suite (452 Tests)
 ```bash
 ./scripts/run_competition.sh test
 ```
-*Expected: 390 passed, 0 failed in ~13s.*
+*Expected: 452 passed, 0 failed in ~30s.*
 
 ### Step 2: Execute the 1,000-Profile Benchmark Run
 ```bash
@@ -372,7 +372,7 @@ PYTHONPATH=src uv run python scripts/run_competition_batch.py \
 ```bash
 ./scripts/run_competition.sh manifest
 ```
-*Updates [`MANIFEST.json`](file:///Users/apple/Desktop/Namandeep%20Tripathi/My%20Projects/OrgTrace/MANIFEST.json) with exact SHA-256 hashes of all artifacts.*
+*Updates [`MANIFEST.json`](../MANIFEST.json) with exact SHA-256 hashes of all artifacts.*
 
 ---
 

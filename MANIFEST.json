@@ -2,21 +2,24 @@
   "schema_version": "1.0.0",
   "project": {
     "name": "OrgTrace",
+    "agent_entry_name": "OrgTrace",
+    "builder_name": "Naman Deep Tripathi",
     "version": "0.1.0",
     "description": "Deterministic, evidence-backed Norwegian enterprise intelligence engine",
-    "repository": "namandeeptripathi/OrgTrace"
+    "repository": "https://github.com/namandeeptripathi/OrgTrace"
   },
   "reproducibility": {
-    "git_commit": "99c56c77f41ae6c5c1406951588b9ffce7651373",
+    "git_commit": "54a50317cb55b557ee6a3f52c92d07eae4f35090",
     "git_branch": "main",
     "python_version": "3.14.7",
     "platform": "darwin",
-    "timestamp_utc": "2026-09-25T19:06:54Z"
+    "timestamp_utc": "2026-10-16T22:54:11+05:30"
   },
   "execution": {
     "entrypoint_command": "./scripts/run_competition.sh",
+    "batch_command": "./scripts/run_competition.sh smoke",
     "evaluation_command": "PYTHONPATH=src uv run python -m norway_company_agent.evaluation",
-    "test_command": "PYTHONPATH=src uv run python -m unittest tests.test_poc -v",
+    "test_command": "uv run pytest",
     "benchmark_size": 1000,
     "runtime_environment": "production"
   },

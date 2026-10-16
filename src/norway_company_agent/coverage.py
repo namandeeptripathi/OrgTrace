@@ -661,12 +661,29 @@ class UnifiedCompanyProfile:
         claims = []
         evidence_list = []
 
+        # Strict OUTPUT_CONTRACT.md allowed availability states:
+        # available, not_available, blocked, not_applicable, ambiguous, failed
+        availability_map = {
+            "available": "available",
+            "unavailable": "not_available",
+            "not_available": "not_available",
+            "not_found": "not_available",
+            "not_applicable": "not_applicable",
+            "conflicting_sources": "ambiguous",
+            "ambiguous": "ambiguous",
+            "extraction_failed": "failed",
+            "failed": "failed",
+            "blocked": "blocked",
+        }
+
         for i, (cat, fact) in enumerate(self.facts.items()):
             ev_id = f"ev-{i+1}"
+            raw_status = fact.status.value if hasattr(fact.status, "value") else str(fact.status)
+            contract_avail = availability_map.get(raw_status, "not_available")
             claims.append({
                 "field": cat.value,
                 "value": fact.normalized_value if fact.value is not None else None,
-                "availability": fact.status.value,
+                "availability": contract_avail,
                 "confidence": round(fact.confidence, 2),
                 "evidence_ids": [ev_id] if fact.evidence_span or fact.source_url else [],
             })

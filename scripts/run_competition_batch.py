@@ -42,11 +42,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluator-owned Signalpost batch contract")
     parser.add_argument("--organisations", required=True, help="JSON, JSONL, or text organisation-number list")
     parser.add_argument("--bulk", default=None, help="Frozen Brreg entity snapshot (optional)")
-    parser.add_argument("--output", required=True, help="Terminal envelope JSONL")
-    parser.add_argument("--profiles-output", required=True)
-    parser.add_argument("--report", required=True)
-    parser.add_argument("--run-id", required=True)
-    parser.add_argument("--expected-count", type=int, default=100)
+    parser.add_argument("--output", default="out/envelopes.jsonl", help="Terminal envelope JSONL (default: out/envelopes.jsonl)")
+    parser.add_argument("--profiles-output", default="out/profiles.jsonl", help="Profiles JSONL (default: out/profiles.jsonl)")
+    parser.add_argument("--report", default="out/run-report.json", help="Run report JSON (default: out/run-report.json)")
+    parser.add_argument("--run-id", default="competition-run-001", help="Execution run identifier")
+    parser.add_argument("--expected-count", type=int, default=None, help="Expected number of organisations (optional check)")
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--checkpoint-every", type=int, default=25)
     parser.add_argument("--resume", action="store_true")
@@ -75,8 +75,9 @@ def main() -> None:
 
     organisation_inputs = read_organisation_inputs(args.organisations)
     orgs = [item["organisation_number"] for item in organisation_inputs]
-    if len(orgs) != args.expected_count:
+    if args.expected_count is not None and len(orgs) != args.expected_count:
         raise SystemExit(f"Expected {args.expected_count} organisations, received {len(orgs)}")
+    expected_count = args.expected_count if args.expected_count is not None else len(orgs)
     profiles, registry_metadata = profiles_from_bulk(args.bulk, orgs)
     annotations = {item["organisation_number"]: item for item in organisation_inputs}
     for profile in profiles:
@@ -520,7 +521,7 @@ def main() -> None:
         terminal_envelope(profile, run_id=args.run_id, modules=requested_modules, started_at=started_at, completed_at=completed_at)
         for profile in ordered_profiles
     ]
-    validation = validate_envelopes(envelopes, args.expected_count)
+    validation = validate_envelopes(envelopes, expected_count)
     write_jsonl(profiles_output, ordered_profiles)
     write_jsonl(Path(args.output), envelopes)
     latencies = sorted(operations.pop("latencies_ms"))
@@ -537,7 +538,7 @@ def main() -> None:
         "run_id": args.run_id,
         "started_at": started_at,
         "completed_at": completed_at,
-        "expected_count": args.expected_count,
+        "expected_count": expected_count,
         "emitted_envelopes": len(envelopes),
         "resumed_profiles": resumed_profiles,
         "profiles_fetched_this_run": len(pending_profiles),

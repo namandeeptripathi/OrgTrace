@@ -113,19 +113,28 @@ case "${MODE}" in
         echo "SUCCESS: Smoke batch complete. Output: out/smoke-envelopes.jsonl"
         ;;
     eval|--eval|evaluation)
-        if [ -z "${1:-}" ]; then
-            echo "Usage: ./scripts/run_competition.sh eval <path-to-100-company-file.jsonl>"
+        if [ -n "${1:-}" ]; then
+            EVAL_INPUT="$1"
+            shift || true
+        elif [ -f "data/smoke-companies.jsonl" ]; then
+            EVAL_INPUT="data/smoke-companies.jsonl"
+            echo "Notice: No input file specified; evaluating sample cohort: ${EVAL_INPUT}"
+        elif [ -f "smoke-companies.jsonl" ]; then
+            EVAL_INPUT="smoke-companies.jsonl"
+            echo "Notice: No input file specified; evaluating sample cohort: ${EVAL_INPUT}"
+        else
+            echo "Usage: ./scripts/run_competition.sh eval [path-to-company-file.jsonl]"
             exit 1
         fi
-        EVAL_INPUT="$1"
-        shift || true
         echo "================================================================================"
-        echo " OrgTrace: Running 100-Company Evaluation Batch"
+        echo " OrgTrace: Running Evaluation Batch on ${EVAL_INPUT}"
         echo "================================================================================"
         mkdir -p out
         BULK_ARGS=()
         if [ -f "brreg-enheter.csv" ]; then
             BULK_ARGS=(--bulk brreg-enheter.csv)
+        else
+            echo "Notice: 'brreg-enheter.csv' not found. Using live Brreg open API fallback."
         fi
         OUT_PROFILES="${PROFILES_OUT:-out/profiles.jsonl}"
         OUT_ENVELOPES="${ENVELOPES_OUT:-out/envelopes.jsonl}"
@@ -136,14 +145,13 @@ case "${MODE}" in
             --profiles-output "${OUT_PROFILES}" \
             --output "${OUT_ENVELOPES}" \
             --report "${OUT_REPORT}" \
-            --run-id eval-100 \
-            --expected-count 100 \
+            --run-id eval-run-001 \
             --max-requests 2000 \
             --max-cost 10.0 \
             --max-runtime 2700.0 \
             --modules registry,accounting_obligation,financials,roles,locations,website "$@"
         echo ""
-        echo "SUCCESS: 100-company evaluation batch complete."
+        echo "SUCCESS: Evaluation batch complete."
         echo "  - Envelopes: ${OUT_ENVELOPES}"
         echo "  - Profiles:  ${OUT_PROFILES}"
         echo "  - Report:    ${OUT_REPORT}"
@@ -185,7 +193,7 @@ case "${MODE}" in
         echo "Modes:"
         echo "  full         Run 1,000-profile competition batch (default)"
         echo "  smoke        Run 10-profile smoke batch"
-        echo "  eval         Run 100-company evaluation batch (<path-to-100-company-file.jsonl>)"
+        echo "  eval         Run evaluation batch ([path-to-company-file.jsonl], defaults to sample cohort)"
         echo "  eval-legacy  Run Stage 10 Evaluation & Optimization Harness"
         echo "  test         Run test suite (pytest or unittest)"
         echo "  replay       Run deterministic refresh replay demonstration"
