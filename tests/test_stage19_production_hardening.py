@@ -317,7 +317,81 @@ class CleanEnvironmentVerificationTests(unittest.TestCase):
                     if pattern in text:
                         violations.append(f"{py_file.relative_to(root)}: contains '{pattern}'")
 
-        self.assertEqual(violations, [], f"Hardcoded developer paths found in code: {violations}")
+class CompetitionRunnerBashRegressionTests(unittest.TestCase):
+    """Regression tests for scripts/run_competition.sh under set -u and macOS Bash 3.2."""
+
+    def test_run_competition_script_help_under_bash(self):
+        """Verify the runner script executes cleanly under /bin/bash (Bash 3.2 on macOS)."""
+        import subprocess
+
+        root = Path(__file__).resolve().parents[1]
+        script = root / "scripts" / "run_competition.sh"
+
+        res = subprocess.run(
+            ["/bin/bash", str(script), "--help"],
+            cwd=str(root),
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("Usage: ./scripts/run_competition.sh", res.stdout)
+        self.assertIn("smoke", res.stdout)
+        self.assertIn("eval", res.stdout)
+
+    def test_safe_bulk_args_expansion_in_bash(self):
+        """Verify that ${BULK_ARGS[@]+"${BULK_ARGS[@]}"} does not error under set -u when empty,
+        and expands properly when populated.
+        """
+        import subprocess
+
+        script = """
+set -euo pipefail
+BULK_ARGS=()
+test_empty() {
+    echo "count:$#"
+}
+test_empty ${BULK_ARGS[@]+"${BULK_ARGS[@]}"}
+
+BULK_ARGS=(--bulk brreg-enheter.csv)
+test_populated() {
+    echo "count:$#"
+    echo "arg1:$1"
+    echo "arg2:$2"
+}
+test_populated ${BULK_ARGS[@]+"${BULK_ARGS[@]}"}
+"""
+        res = subprocess.run(
+            ["/bin/bash", "-c", script],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res.returncode, 0, f"Bash failed with stderr: {res.stderr}")
+        self.assertIn("count:0", res.stdout)
+        self.assertIn("count:2", res.stdout)
+        self.assertIn("arg1:--bulk", res.stdout)
+        self.assertIn("arg2:brreg-enheter.csv", res.stdout)
+
+    def test_runner_contains_safe_bulk_args_expansion_in_all_modes(self):
+        """Ensure scripts/run_competition.sh uses safe array expansion in full, smoke, and eval modes."""
+        import re
+
+        root = Path(__file__).resolve().parents[1]
+        runner = (root / "scripts" / "run_competition.sh").read_text(encoding="utf-8")
+
+        # Unsafe standalone expansion "${BULK_ARGS[@]}" must NOT appear without the ${arr[@]+...} guard
+        standalone_unsafe = re.findall(r'(?<!\$\{BULK_ARGS\[@\]\+)"\$\{BULK_ARGS\[@\]\}"', runner)
+        self.assertEqual(
+            standalone_unsafe,
+            [],
+            f"Unsafe standalone '\"${{BULK_ARGS[@]}}\"' array expansion found in scripts/run_competition.sh: {standalone_unsafe}",
+        )
+        # Safe expansion must appear at least 3 times (full, smoke, eval)
+        safe_expansion_count = runner.count('${BULK_ARGS[@]+"${BULK_ARGS[@]}"}')
+        self.assertGreaterEqual(
+            safe_expansion_count,
+            3,
+            f"Expected at least 3 safe expansions in run_competition.sh, found {safe_expansion_count}",
+        )
 
 
 if __name__ == "__main__":

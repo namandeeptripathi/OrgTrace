@@ -66,9 +66,22 @@ class ApiEndpointTests(unittest.TestCase):
         self.assertEqual(ctx.exception.status_code, 404)
 
     def test_batch_report_endpoint(self):
-        data = get_batch()
-        self.assertIn("run_id", data)
-        self.assertIn("request_budget", data)
+        if not store.report:
+            with patch.object(store, "report", {"run_id": "test-run", "request_budget": {"request_limit": 2000}}):
+                data = get_batch()
+                self.assertIn("run_id", data)
+                self.assertIn("request_budget", data)
+        else:
+            data = get_batch()
+            self.assertIn("run_id", data)
+            self.assertIn("request_budget", data)
+
+    def test_batch_report_endpoint_not_found_when_empty(self):
+        with patch.object(store, "report", None):
+            with self.assertRaises(HTTPException) as ctx:
+                get_batch()
+            self.assertEqual(ctx.exception.status_code, 404)
+            self.assertIn("No competition batch report", ctx.exception.detail)
 
 
 if __name__ == "__main__":

@@ -345,11 +345,11 @@ All 1,000 output envelopes in [`out/envelopes.jsonl`](../out/envelopes.jsonl) we
 
 To reproduce every number in this benchmark report from a clean shell:
 
-### Step 1: Run the Official Test Suite (452 Tests)
+### Step 1: Run the Official Test Suite (456 Tests)
 ```bash
 ./scripts/run_competition.sh test
 ```
-*Expected: 452 passed, 0 failed in ~30s.*
+*Expected: 456 passed, 0 failed in ~30s.*
 
 ### Step 2: Execute the 1,000-Profile Benchmark Run
 ```bash

@@ -6,7 +6,7 @@
 [![Live Demo: Vercel](https://img.shields.io/badge/Live_Demo-org--trace.vercel.app-000000?style=flat&logo=vercel)](https://org-trace.vercel.app)
 [![Backend API: Railway](https://img.shields.io/badge/API-Railway-0B0D0E?style=flat&logo=railway)](https://orgtrace-production-07b0.up.railway.app)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 452 Passed](https://img.shields.io/badge/tests-452%20passed-brightgreen.svg)](tests/)
+[![Tests: 456 Passed](https://img.shields.io/badge/tests-456%20passed-brightgreen.svg)](tests/)
 [![Benchmark: 1,000 Profiles](https://img.shields.io/badge/benchmark-1%2C000%20profiles-success.svg)](docs/final-benchmark.md)
 [![Data License: NLOD 2.0](https://img.shields.io/badge/Data_License-NLOD%202.0-blue.svg)](https://data.norge.no/nlod/no/2.0)
 
@@ -244,7 +244,7 @@ See [`docs/dependencies-and-licenses.md`](docs/dependencies-and-licenses.md) for
 | **Backend API** | FastAPI, Uvicorn (stateless in-memory cache, CORS middleware, security error shields) |
 | **Frontend Application** | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS |
 | **Cloud Hosting** | **Vercel** (Frontend) & **Railway** (Backend API container) |
-| **Testing & Verification** | Pytest, Unittest (452 unit & integration tests) |
+| **Testing & Verification** | Pytest, Unittest (456 unit & integration tests) |
 
 ---
 
@@ -269,7 +269,7 @@ Derived directly from an un-mocked execution of the production pipeline on **1,0
 | **External HTTP Requests** | **1,618 requests** | ≤ 2,000 requests | ✅ **80.9% of budget used** (382 remaining) |
 | **HTTP Request Success Rate** | **99.01%** (1,602 / 1,618) | ≥ 95.0% target | Minimal upstream drops |
 | **Third-Party API Spend** | **$0.0000 USD** | ≤ $10.00 USD cap | ✅ **100% budget preserved** |
-| **Automated Test Suite** | **452 passed, 0 failed** | 100% passing across all stages | ✅ 100% Pass Rate |
+| **Automated Test Suite** | **456 passed, 0 failed** | 100% passing across all stages | ✅ 100% Pass Rate |
 
 *Why 907 Partial Profiles?* In the benchmark universe, ~89.3% of entities (such as holding vehicles, property associations, or asset holding firms) do not operate or register a website. Rather than fabricating websites or reporting false claims, OrgTrace records `not_found` or `not_applicable` with supporting evidence, preserving 100% precision.
 
@@ -438,7 +438,7 @@ OrgTrace provides a unified, executable runner script [`scripts/run_competition.
 # 3. Run Stage 18 Competition Evaluation Harness
 ./scripts/run_competition.sh eval
 
-# 4. Run complete automated test suite (452 tests)
+# 4. Run complete automated test suite (456 tests)
 ./scripts/run_competition.sh test
 # Or directly via pytest:
 uv run pytest
@@ -496,7 +496,7 @@ OrgTrace/
 │   ├── run_refresh_replay.py          # Deterministic snapshot replay script
 │   └── generate_manifest.py           # Tool to regenerate MANIFEST.json
 │
-├── tests/                             # Automated test suite (452 tests)
+├── tests/                             # Automated test suite (456 tests)
 │   ├── test_poc.py                    # Core unit and integration tests
 │   ├── test_api.py                    # FastAPI endpoint tests
 │   ├── test_search_enrichment.py      # Recall discovery & search enrichment tests

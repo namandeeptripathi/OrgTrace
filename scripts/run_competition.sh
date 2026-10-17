@@ -61,7 +61,7 @@ case "${MODE}" in
         fi
         ${PYTHON_CMD} scripts/run_competition_batch.py \
             --organisations entry-companies.jsonl \
-            "${BULK_ARGS[@]}" \
+            ${BULK_ARGS[@]+"${BULK_ARGS[@]}"} \
             --profiles-output out/profiles.jsonl \
             --output out/envelopes.jsonl \
             --report out/run-report.json \
@@ -99,7 +99,7 @@ case "${MODE}" in
         fi
         ${PYTHON_CMD} scripts/run_competition_batch.py \
             --organisations "${SMOKE_SRC}" \
-            "${BULK_ARGS[@]}" \
+            ${BULK_ARGS[@]+"${BULK_ARGS[@]}"} \
             --profiles-output out/smoke-profiles.jsonl \
             --output out/smoke-envelopes.jsonl \
             --report out/smoke-report.json \
@@ -141,7 +141,7 @@ case "${MODE}" in
         OUT_REPORT="${REPORT_OUT:-out/run-report.json}"
         ${PYTHON_CMD} scripts/run_competition_batch.py \
             --organisations "${EVAL_INPUT}" \
-            "${BULK_ARGS[@]}" \
+            ${BULK_ARGS[@]+"${BULK_ARGS[@]}"} \
             --profiles-output "${OUT_PROFILES}" \
             --output "${OUT_ENVELOPES}" \
             --report "${OUT_REPORT}" \
