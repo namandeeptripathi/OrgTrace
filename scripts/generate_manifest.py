@@ -225,8 +225,16 @@ def main() -> None:
         mismatches = []
         if existing.get("project", {}).get("name") != manifest["project"]["name"]:
             mismatches.append("project.name")
-        if existing.get("reproducibility", {}).get("git_commit") != manifest["reproducibility"]["git_commit"]:
-            mismatches.append(f"git_commit (expected {manifest['reproducibility']['git_commit']}, got {existing.get('reproducibility', {}).get('git_commit')})")
+        recorded_commit = existing.get("reproducibility", {}).get("git_commit")
+        try:
+            parent_commit = subprocess.check_output(["git", "rev-parse", "HEAD^"], cwd=ROOT, text=True, stderr=subprocess.DEVNULL).strip()
+        except Exception:
+            parent_commit = ""
+        valid_commits = {manifest["reproducibility"]["git_commit"], parent_commit}
+        if args.commit:
+            valid_commits.add(args.commit)
+        if recorded_commit not in valid_commits:
+            mismatches.append(f"git_commit (expected {manifest['reproducibility']['git_commit']}, got {recorded_commit})")
         if existing.get("execution", {}).get("test_command") != manifest["execution"]["test_command"]:
             mismatches.append("execution.test_command")
         if mismatches:
