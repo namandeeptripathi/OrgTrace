@@ -387,5 +387,203 @@ class SeparationOfConfirmedUnsureRejectedFactsTests(unittest.TestCase):
         self.assertEqual(news_claim["availability"], "not_available")
 
 
+class DualPathEnrichmentRegressionTests(unittest.TestCase):
+    """Regression tests for both paths: verified registry website and rejected/missing registry website."""
+
+    def test_path1_verified_registry_website_with_independent_search_corroboration_and_enrichment(self):
+        """Path 1: Verified registry website runs search discovery to corroborate domain and extract news/hiring."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Nordic Tech AS",
+            "website": "https://nordictech.no",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://nordictech.no",
+                    value={
+                        "final_url": "https://nordictech.no",
+                        "title": "Nordic Tech AS - Hovedside",
+                        "main_text": "Velkommen til Nordic Tech AS i Oslo. Vi leverer sikre skytjenester. Org.nr: 999 888 777 MVA.",
+                        "pages": [],
+                    },
+                )
+            },
+        }
+
+        # Independent search returns matching domain, plus news and hiring
+        search_results = [
+            {
+                "url": "https://nordictech.no/om-oss",
+                "title": "Om Nordic Tech AS",
+                "snippet": "Nordic Tech AS org.nr 999888777 leverer skytjenester i Oslo.",
+            },
+            {
+                "url": "https://e24.no/teknologi/i/abc123/nordic-tech-as-vinner-anbud",
+                "title": "Nordic Tech AS vinner stor offentlig kontrakt",
+                "snippet": "Nordic Tech AS i Oslo har vunnet en fireårig rammeavtale.",
+                "published_at": "2024-04-15",
+            },
+            {
+                "url": "https://nordictech.teamtailor.com/jobs/101",
+                "title": "Senior Utvikler hos Nordic Tech AS",
+                "snippet": "Nordic Tech AS søker en erfaren utvikler i Oslo.",
+            },
+        ]
+
+        # 1. Comparison corroborates the registry domain
+        comparison = compare_registry_and_search_candidates(profile, profile["evidence"]["website"], search_results)
+        self.assertEqual(comparison["verdict"], "corroborated")
+        self.assertEqual(comparison["selected_url"], "https://nordictech.no")
+        self.assertEqual(comparison["confidence"], 0.99)
+
+        # 2. Search enrichment executes for this company with a verified registry website
+        enrichment = extract_search_enrichment(profile, search_results, retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["news"]), 1)
+        self.assertEqual(enrichment["news"][0]["date"], "2024-04-15")
+        self.assertEqual(len(enrichment["hiring"]), 1)
+        self.assertEqual(enrichment["hiring"][0]["platform"].lower(), "teamtailor")
+
+        # 3. Attach search enrichment evidence to profile
+        profile["evidence"]["news_search"] = evidence(
+            "news", "available", "public_search",
+            "https://api.search.brave.com/res/v1/web/search",
+            value=enrichment["news"],
+            confidence=0.9,
+        )
+        profile["evidence"]["hiring_search"] = evidence(
+            "careers", "available", "public_search",
+            "https://api.search.brave.com/res/v1/web/search",
+            value=enrichment["hiring"],
+            confidence=0.9,
+        )
+
+        # 4. Profile builder includes verified website and search news
+        unified = build_unified_company_profile(profile)
+        web_fact = unified.get_fact(CoverageCategory.WEBSITE)
+        self.assertEqual(web_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(web_fact.value, "https://nordictech.no")
+
+        news_fact = unified.get_fact(CoverageCategory.NEWS_EVENTS)
+        self.assertEqual(news_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(len(news_fact.value), 1)
+        self.assertEqual(news_fact.value[0]["title"], "Nordic Tech AS vinner stor offentlig kontrakt")
+
+        # 5. Contract envelope validation
+        envelope = unified.to_contract_envelope()
+        web_claim = next(c for c in envelope["claims"] if c["field"] == "website")
+        news_claim = next(c for c in envelope["claims"] if c["field"] == "news_events")
+        self.assertEqual(web_claim["availability"], "available")
+        self.assertEqual(web_claim["value"], "https://nordictech.no")
+        self.assertEqual(news_claim["availability"], "available")
+        self.assertIn("Nordic Tech AS vinner stor offentlig kontrakt", news_claim["value"])
+
+    def test_path2_conflicting_registry_website_and_search_candidate_not_published(self):
+        """Path 2: Registry domain and search candidate domain in conflict -> marked unsure, not published."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Sub Corp AS",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://parentgroup.no",
+                    value={
+                        "final_url": "https://parentgroup.no",
+                        "title": "Sub Corp AS Parent Site",
+                        "main_text": "Sub Corp AS er en del av Parent Group. Org.nr: 999 888 777 MVA.",
+                    },
+                )
+            },
+        }
+
+        # Independent search returns a different publishable domain for the subsidiary
+        search_results = [
+            {
+                "url": "https://subcorp.no",
+                "title": "Sub Corp AS Offisiell",
+                "snippet": "Velkommen til Sub Corp AS. Org.nr: 999 888 777 MVA i Oslo.",
+            }
+        ]
+
+        comparison = compare_registry_and_search_candidates(profile, profile["evidence"]["website"], search_results)
+        self.assertEqual(comparison["verdict"], "unsure_conflict")
+        self.assertFalse(comparison["publishable"])
+        self.assertIsNone(comparison["selected_url"])
+
+        # When unsure_conflict occurs, final decision rejects both from published facts
+        profile["website"] = None
+        profile["evidence"]["website"] = evidence(
+            "website", "not_found", "conflicting_sources", "https://parentgroup.no",
+            note=comparison["comparison_reason"],
+        )
+        profile.setdefault("unsure_evidence", {})["website"] = {
+            "status": "ambiguous",
+            "reason": comparison["comparison_reason"],
+            "quarantined_urls": comparison["quarantined_urls"],
+        }
+
+        unified = build_unified_company_profile(profile)
+        web_fact = unified.get_fact(CoverageCategory.WEBSITE)
+        self.assertEqual(web_fact.status, CoverageFieldStatus.NOT_FOUND)
+        self.assertIsNone(web_fact.value)
+
+        envelope = unified.to_contract_envelope()
+        web_claim = next(c for c in envelope["claims"] if c["field"] == "website")
+        self.assertEqual(web_claim["availability"], "not_available")
+        self.assertIsNone(web_claim["value"])
+        self.assertEqual(web_claim["evidence_ids"], [])
+        self.assertTrue(len(envelope.get("unsure_facts", [])) > 0)
+
+    def test_path3_rejected_registry_website_with_search_candidate_preferred(self):
+        """Path 3: Registry website rejected, search candidate preferred and identity-gated."""
+        rej_web = evidence(
+            "website", "not_found", "registry_linked_company_website", "https://beta-parked.com",
+            note="captured page is a parked domain placeholder",
+            value={"final_url": "https://beta-parked.com", "title": "Buy this domain"},
+        )
+        rej_web["identity_rejected"] = True
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Beta Consult AS",
+            "website": "https://beta-parked.com",
+            "evidence": {
+                "website": rej_web,
+            },
+        }
+
+        search_results = [
+            {
+                "url": "https://betaconsult.no",
+                "title": "Beta Consult AS",
+                "snippet": "Velkommen til Beta Consult AS. Org.nr 999 888 777.",
+            }
+        ]
+
+        comparison = compare_registry_and_search_candidates(profile, profile["evidence"]["website"], search_results)
+        self.assertEqual(comparison["verdict"], "search_candidate_preferred")
+        self.assertEqual(comparison["selected_url"].rstrip("/"), "https://betaconsult.no")
+
+    def test_path4_verified_registry_website_offline_fallback_respects_limits(self):
+        """Path 4: When Brave search key is absent or budget is exhausted, verified registry site is preserved."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Gamma AS",
+            "website": "https://gamma.no",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://gamma.no",
+                    value={
+                        "final_url": "https://gamma.no",
+                        "title": "Gamma AS",
+                        "main_text": "Gamma AS leverer IT. Org.nr: 999 888 777 MVA.",
+                    },
+                )
+            },
+        }
+
+        # Offline: no search performed, registry evidence stays available
+        unified = build_unified_company_profile(profile)
+        web_fact = unified.get_fact(CoverageCategory.WEBSITE)
+        self.assertEqual(web_fact.status, CoverageFieldStatus.AVAILABLE)
+        self.assertEqual(web_fact.value, "https://gamma.no")
+
+
 if __name__ == "__main__":
     unittest.main()

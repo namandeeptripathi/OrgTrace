@@ -190,8 +190,19 @@ def compare_registry_and_search_candidates(
     reg_host = (urllib.parse.urlparse(reg_url).hostname or "").lower().removeprefix("www.")
     search_host = (urllib.parse.urlparse(search_url).hostname or "").lower().removeprefix("www.")
 
+    # If independent search returned a result on the registry domain, consider it for corroboration
+    if reg_host and search_candidates and not search_host:
+        matching_cand = next(
+            (c for c in search_candidates if (urllib.parse.urlparse(str(c.get("url") or "")).hostname or "").lower().removeprefix("www.") == reg_host),
+            None,
+        )
+        if matching_cand:
+            selected_search = matching_cand
+            search_url = str(matching_cand.get("url") or "").strip()
+            search_host = reg_host
+
     reg_publishable = bool(reg_assessment and reg_assessment.get("publishable") and registry_website and registry_website.get("status") == "available")
-    search_publishable = bool(selected_search and selected_search.get("publishable_candidate"))
+    search_publishable = bool(selected_search and (selected_search.get("publishable_candidate") or search_host == reg_host))
 
     # Case 1: Both candidates exist and agree on domain
     if reg_host and search_host and (reg_host == search_host or reg_host.endswith("." + search_host) or search_host.endswith("." + reg_host)):
@@ -236,7 +247,21 @@ def compare_registry_and_search_candidates(
             "quarantined_urls": [reg_url] if reg_url else [],
         }
 
-    # Case 3: Registry is confirmed exact match
+    # Case 3: Both are publishable but domains conflict!
+    if reg_publishable and search_publishable and reg_host != search_host:
+        return {
+            "verdict": "unsure_conflict",
+            "status": "ambiguous",
+            "publishable": False,
+            "selected_url": None,
+            "confidence": 0.0,
+            "comparison_reason": f"Registry domain '{reg_host}' conflicts with search candidate domain '{search_host}' without conclusive exact-entity corroboration",
+            "registry_assessment": reg_assessment,
+            "search_candidate": selected_search,
+            "quarantined_urls": [reg_url, search_url],
+        }
+
+    # Case 4: Registry is confirmed exact match (and search candidate is not conflicting or does not exist)
     if reg_publishable:
         return {
             "verdict": "registry_confirmed",
@@ -250,7 +275,7 @@ def compare_registry_and_search_candidates(
             "quarantined_urls": [],
         }
 
-    # Case 4: Registry rejected and no valid search candidate
+    # Case 5: Registry rejected and no valid search candidate
     if reg_url and not reg_publishable and not search_publishable:
         rej_desc = reg_assessment.get("status") if reg_assessment else "unverified"
         rej_reasons = "; ".join(reg_assessment.get("reasons", [])) if reg_assessment else "lacks exact-entity proof"

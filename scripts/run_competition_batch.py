@@ -205,8 +205,10 @@ def main() -> None:
                         profile["website"] = None
                         reg_site_record = profile["evidence"]["website"]
 
-                if (not profile.get("website")) and brave_api_key and not guard.is_reduced_mode():
-                    # No verified registry website — attempt discovery fallback if budget permits.
+                # Run independent discovery whenever Brave API key and request budget permit,
+                # both for companies with verified registry websites (to corroborate and enrich)
+                # and for companies without verified websites (for discovery fallback).
+                if brave_api_key and not guard.is_reduced_mode():
                     allow_discovery = False
                     with discovery_budget_lock:
                         if discovery_budget_state["count"] < discovery_budget_limit:
@@ -233,15 +235,11 @@ def main() -> None:
                         with discovery_stats_lock:
                             discovery_stats["candidates_found"] += len(search_results)
 
-                        # Compare registry website with independent search candidates
-                        comparison = compare_registry_and_search_candidates(profile, reg_site_record, search_results)
-                        profile["website_comparison"] = comparison
-
                         decision = choose_search_candidate(profile, search_results)
                         selected = decision.get("selected")
                         # One bounded retry with a different exact-entity query when
-                        # the first search misses a publishable company site.
-                        if not selected and allowed and guard.remaining_requests > 120:
+                        # the first search misses a publishable company site for unverified companies.
+                        if (not profile.get("website")) and (not selected) and guard.remaining_requests > 120:
                             variants = build_company_search_queries(profile)
                             first_query = variants[0] if variants else None
                             for variant in variants[1:2]:
@@ -270,7 +268,7 @@ def main() -> None:
                                 if selected:
                                     break
 
-                        # Reuse the same public search response for recall signals.
+                        # Extract news and hiring enrichment (always runs when search results are retrieved)
                         enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
                         if enrichment.get("rejected_news"):
                             profile.setdefault("rejected_evidence", {})["news"] = enrichment["rejected_news"]
@@ -310,54 +308,102 @@ def main() -> None:
                                 company_name=profile.get("name"), identity_match=True,
                                 confidence=max(x.get("confidence", 0.0) for x in enrichment["hiring"]),
                             )
-                        if selected:
-                            with discovery_stats_lock:
-                                discovery_stats["candidates_crawled"] += 1
-                            website_record, crawl_metrics = fetch_website(selected["url"], guard=guard)
-                            website_metrics["requests"] += crawl_metrics["requests"]
-                            website_metrics["bytes"] += crawl_metrics["bytes"]
-                            website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
-                            gated = apply_website_identity_gate(profile, website_record)
-                            website = gated["website"]
-                            assessment = gated.get("assessment")
-                            website["source_type"] = "search_discovered_company_website"
-                            if assessment and assessment.get("publishable") and website.get("status") == "available":
-                                profile["evidence"]["website"] = website
-                                discovered_url = (website.get("value") or {}).get("final_url") or website.get("source_url") or selected["url"]
-                                profile["website"] = discovered_url
+
+                        # Compare registry website with independent search candidates
+                        comparison = compare_registry_and_search_candidates(profile, reg_site_record, search_results)
+                        profile["website_comparison"] = comparison
+
+                        # ACTUALLY USE the registry-vs-search comparison verdict in final website selection:
+                        verdict = comparison.get("verdict")
+                        if verdict == "corroborated":
+                            # Registry and search agree on domain!
+                            if reg_site_record and reg_site_record.get("status") == "available":
+                                reg_site_record["confidence"] = 0.99
+                                reg_site_record["corroborated"] = True
+                                profile["evidence"]["website"] = reg_site_record
+                                profile["website"] = comparison.get("selected_url") or profile.get("website")
+                        elif verdict == "registry_confirmed":
+                            # Registry confirmed exact match, search had no conflicting publishable candidate
+                            if reg_site_record and reg_site_record.get("status") == "available":
+                                profile["evidence"]["website"] = reg_site_record
+                                profile["website"] = comparison.get("selected_url") or profile.get("website")
+                        elif verdict == "search_candidate_preferred":
+                            # Registry was rejected or missing; search candidate is company-specific
+                            search_url = comparison.get("selected_url") or (selected["url"] if selected else None)
+                            if search_url and guard.remaining_requests > 50:
                                 with discovery_stats_lock:
-                                    discovery_stats["candidates_accepted"] += 1
+                                    discovery_stats["candidates_crawled"] += 1
+                                website_record, crawl_metrics = fetch_website(search_url, guard=guard)
+                                website_metrics["requests"] += crawl_metrics["requests"]
+                                website_metrics["bytes"] += crawl_metrics["bytes"]
+                                website_metrics["latencies_ms"].extend(crawl_metrics["latencies_ms"])
+                                gated = apply_website_identity_gate(profile, website_record)
+                                website = gated["website"]
+                                assessment = gated.get("assessment")
+                                website["source_type"] = "search_discovered_company_website"
+                                if assessment and assessment.get("publishable") and website.get("status") == "available":
+                                    profile["evidence"]["website"] = website
+                                    discovered_url = (website.get("value") or {}).get("final_url") or website.get("source_url") or search_url
+                                    profile["website"] = discovered_url
+                                    with discovery_stats_lock:
+                                        discovery_stats["candidates_accepted"] += 1
+                                else:
+                                    rej_reason = "Search candidate crawled but exact-entity identity not verified"
+                                    profile["evidence"]["website"] = evidence(
+                                        "website", "not_found",
+                                        "search_discovered_company_website", search_url,
+                                        note=rej_reason,
+                                        content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                                    )
+                                    profile["website"] = None
+                                    with discovery_stats_lock:
+                                        discovery_stats["candidates_rejected"] += 1
+                                        discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
                             else:
-                                rej_reason = "Search candidate crawled but exact-entity identity not verified"
-                                profile["evidence"]["website"] = evidence(
-                                    "website", "not_found",
-                                    "search_discovered_company_website", selected["url"],
-                                    note=rej_reason,
-                                    content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
-                                )
-                                profile["website"] = None
-                                with discovery_stats_lock:
-                                    discovery_stats["candidates_rejected"] += 1
-                                    discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
-                        else:
-                            rej_reason = decision.get("rejection_reason") or "No search result passed the deterministic crawl-candidate gate"
+                                if not profile.get("website"):
+                                    rej_reason = decision.get("rejection_reason") or "No search result passed the deterministic crawl-candidate gate"
+                                    profile["evidence"]["website"] = evidence(
+                                        "website", "not_found",
+                                        "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                                        note=rej_reason,
+                                        content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                                    )
+                        elif verdict == "unsure_conflict":
+                            # Material conflict between registry domain and search domain! Do not publish either.
+                            rej_reason = comparison.get("comparison_reason") or "Registry domain and search domain conflict without conclusive proof"
+                            profile.setdefault("unsure_evidence", {})["website"] = {
+                                "status": "ambiguous",
+                                "reason": rej_reason,
+                                "quarantined_urls": comparison.get("quarantined_urls", []),
+                            }
                             profile["evidence"]["website"] = evidence(
                                 "website", "not_found",
-                                "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                                "conflicting_sources",
+                                (reg_site_record or {}).get("source_url", ""),
                                 note=rej_reason,
                                 content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                             )
-                            with discovery_stats_lock:
-                                discovery_stats["candidates_rejected"] += 1
-                                discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
+                            profile["website"] = None
+                        elif verdict in ("registry_rejected_no_search_candidate", "corroborated_but_unverified", "no_candidates"):
+                            if not (reg_site_record and reg_site_record.get("status") == "available" and profile.get("website")):
+                                profile["website"] = None
+                                rej_reason = comparison.get("comparison_reason") or "No verified company website discovered"
+                                profile["evidence"]["website"] = evidence(
+                                    "website", "not_found",
+                                    "company_website",
+                                    "https://data.brreg.no/enhetsregisteret/api/enheter",
+                                    note=rej_reason,
+                                    content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                                )
                     else:
-                        note = f"Search discovery skipped: {reason}"
-                        profile["evidence"]["website"] = evidence(
-                            "website", "not_attempted",
-                            "search_discovery", "https://api.search.brave.com/res/v1/web/search",
-                            note=note,
-                            content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
-                        )
+                        if not profile.get("website"):
+                            note = f"Search discovery skipped: {reason}"
+                            profile["evidence"]["website"] = evidence(
+                                "website", "not_attempted",
+                                "search_discovery", "https://api.search.brave.com/res/v1/web/search",
+                                note=note,
+                                content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
+                            )
                 elif not profile.get("website"):
                     note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
                     profile["evidence"]["website"] = evidence(

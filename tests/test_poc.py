@@ -1610,8 +1610,8 @@ class CompetitionBatchDiscoveryTests(unittest.TestCase):
             "social_links": [],
         }), {"requests": 2, "bytes": 5000, "latencies_ms": [100]}
 
-    def test_registry_website_present_skips_discovery(self):
-        """When the registry provides a website, the production enrich() must not call brave_search."""
+    def test_registry_website_present_runs_corroboration_discovery(self):
+        """When the registry provides a website and API key is set, discovery runs to corroborate and enrich."""
         import tempfile
         import scripts.run_competition_batch as batch_mod
 
@@ -1621,7 +1621,19 @@ class CompetitionBatchDiscoveryTests(unittest.TestCase):
 
         def mock_brave(*_args, **_kwargs):
             brave_called["count"] += 1
-            return [], {"status": 0, "latency_ms": 0, "bytes": 0, "query_sha256": "x"}
+            return [
+                {
+                    "url": "https://known.no/om-oss",
+                    "title": "Om Norsk Fiskeeksport AS",
+                    "snippet": "Norsk Fiskeeksport AS 923609016 eksporterer sjømat.",
+                },
+                {
+                    "url": "https://e24.no/fiske/i/test/norsk-fiskeeksport-as-rekord",
+                    "title": "Norsk Fiskeeksport AS setter eksportrekord",
+                    "snippet": "Norsk Fiskeeksport AS melder om rekordvekst i Notodden.",
+                    "published_at": "2024-05-20",
+                },
+            ], {"status": 0, "latency_ms": 10, "bytes": 1000, "query_sha256": "x"}
 
         def mock_profiles_from_bulk(_path, orgs):
             return [dict(profile)], {"registry_snapshot_sha256": "a" * 64, "registry_rows_scanned": 1, "requested": 1, "selected": 1}
@@ -1659,9 +1671,20 @@ class CompetitionBatchDiscoveryTests(unittest.TestCase):
             finally:
                 sys.argv = saved_argv
 
-            self.assertEqual(brave_called["count"], 0, "brave_search must not be called when registry website exists")
+            self.assertEqual(brave_called["count"], 1, "brave_search should run when API key is present to corroborate website and discover news/hiring")
             result = json.loads(profiles_output.read_text().strip())
             self.assertEqual(result["evidence"]["website"]["status"], "available")
+            self.assertEqual(result["website_comparison"]["verdict"], "corroborated")
+            self.assertIn("news_search", result["evidence"])
+            self.assertEqual(result["evidence"]["news_search"]["status"], "available")
+
+            # Verify envelope claims
+            env = json.loads(output.read_text().strip())
+            web_claim = next(c for c in env["claims"] if c["field"] == "website")
+            news_claim = next(c for c in env["claims"] if c["field"] == "news_events")
+            self.assertEqual(web_claim["availability"], "available")
+            self.assertEqual(news_claim["availability"], "available")
+            self.assertIn("Norsk Fiskeeksport AS setter eksportrekord", news_claim["value"])
 
     def test_missing_website_valid_discovery_candidate(self):
         """Missing website + valid search candidate + identity-verified → published as available."""

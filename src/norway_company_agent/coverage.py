@@ -1524,22 +1524,27 @@ def build_unified_company_profile(
     news_field = extracted_profile.news if extracted_profile else None
     search_news = evidence_dict.get("news_search") or {}
     search_news_value = search_news.get("value") or []
+    news_candidates = []
+    news_source = norm_website
+    news_type = "company_website"
+    news_conf = 0.0
     if news_field and news_field.status == FieldStatus.FOUND and news_field.value:
-        news_value = news_field.value
-        news_source = news_field.source_url
-        news_type = news_field.source_type
-        news_conf = news_field.confidence
-    elif search_news.get("status") == "available" and search_news_value:
-        news_value = search_news_value
-        news_source = search_news.get("source_url")
-        news_type = "public_search"
-        news_conf = search_news.get("confidence") or 0.85
-    else:
-        news_value = []
-        news_source = norm_website
-        news_type = "company_website"
-        news_conf = 0.0
-    confirmed_news = [n for n in news_value if isinstance(n, dict) and n.get("title") and n.get("date")] if news_value else []
+        news_candidates.extend(news_field.value)
+        news_source = news_field.source_url or news_source
+        news_type = news_field.source_type or news_type
+        news_conf = max(news_conf, news_field.confidence or 0.85)
+    if search_news.get("status") == "available" and search_news_value:
+        seen_urls = {n.get("url") for n in news_candidates if isinstance(n, dict)}
+        for n in search_news_value:
+            if isinstance(n, dict) and n.get("url") not in seen_urls:
+                news_candidates.append(n)
+        if not news_source or news_source == norm_website:
+            news_source = search_news.get("source_url") or news_source
+        if not news_candidates or news_type != "website_news_pages":
+            news_type = "public_search"
+        news_conf = max(news_conf, search_news.get("confidence") or 0.85)
+
+    confirmed_news = [n for n in news_candidates if isinstance(n, dict) and n.get("title") and n.get("date")] if news_candidates else []
     if confirmed_news:
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
             category=CoverageCategory.NEWS_EVENTS, field_name="news_events",
