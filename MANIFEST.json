@@ -9,11 +9,11 @@
     "repository": "https://github.com/namandeeptripathi/OrgTrace"
   },
   "reproducibility": {
-    "git_commit": "4d88a863084b2416be663d6f37f649fa22f850ed",
+    "git_commit": "6f430bf1679e4e5cd540212ea9be3820ab08bdca",
     "git_branch": "main",
     "python_version": "3.14.7",
     "platform": "darwin",
-    "timestamp_utc": "2026-11-05T00:22:10+05:30"
+    "timestamp_utc": "2026-11-05T01:29:19+05:30"
   },
   "execution": {
     "entrypoint_command": "./scripts/run_competition.sh",

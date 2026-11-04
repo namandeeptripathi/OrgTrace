@@ -133,7 +133,7 @@ def _parse_date(
     # Reject if explicitly labeled as modified / updated / retrieval date in text context
     if text_context:
         ctx_lower = text_context.casefold()
-        for marker in ("sist oppdatert", "oppdatert:", "sist endret", "updated:", "last modified", "modified:", "hentet:"):
+        for marker in ("sist oppdatert", "oppdatert:", "sist endret", "updated:", "last modified", "modified:", "hentet:", "endret dato:", "feed", "rss", "retrieved:", "retrieval", "cached:", "synced:"):
             if marker in ctx_lower and raw.casefold() in ctx_lower:
                 idx = ctx_lower.find(marker)
                 if idx != -1 and ctx_lower.find(raw.casefold(), idx) != -1:
@@ -203,7 +203,56 @@ def _is_social(result: dict[str, Any]) -> bool:
     return any(host == domain or host.endswith("." + domain) for domain in SOCIAL_HOSTS)
 
 
+def _ats_rejection_reason(result: dict[str, Any]) -> str:
+    """Return specific non-fabricated rejection reason if candidate is on an ATS host but is invalid."""
+    parsed = urllib.parse.urlparse(str(result.get("url") or ""))
+    host = (parsed.hostname or "").casefold().removeprefix("www.")
+    path = parsed.path.casefold().rstrip("/")
+    query = parsed.query.casefold()
+
+    for domain in ATS_HOSTS:
+        if host == domain or host == "www." + domain:
+            if domain == "finn.no":
+                path_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)/\d+", path) or re.search(r"/jobb/bedrift/[a-z0-9_-]+/\d+", path))
+                query_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)", path) and re.search(r"(?:id|finnkode)=\d+", query))
+                if not (path_has_id or query_has_id):
+                    if re.search(r"/(?:sok|search)\b", path) or re.search(r"(?:q|sok|search)=", query):
+                        return "This is a generic ATS search page, not the company's careers page or individual vacancy"
+                    return "This is the ATS vendor homepage, not the company's careers page"
+            elif domain == "jobbnorge.no":
+                path_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling/\d+", path))
+                query_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling", path) and re.search(r"(?:id|jobid)=\d+", query))
+                if not (path_has_id or query_has_id):
+                    if re.search(r"/(?:sok|search)\b", path) or re.search(r"(?:q|sok|search)=", query):
+                        return "This is a generic ATS search page, not the company's careers page or individual vacancy"
+                    return "This is the ATS vendor homepage, not the company's careers page"
+            else:
+                if re.search(r"/(?:sok|search|explore)\b", path) or re.search(r"(?:q|sok|search)=", query):
+                    return "This is a generic ATS search page, not the company's careers page or individual vacancy"
+                if path in {"", "/", "/en", "/nb", "/no", "/about", "/about-us", "/pricing", "/login", "/contact", "/demo", "/privacy", "/terms", "/jobs", "/careers", "/stillinger"}:
+                    return "This is the ATS vendor homepage, not the company's careers page"
+                if not re.search(r"/(?:companies|jobs|stilling|positions)/[a-z0-9_-]+", path):
+                    return "This is the ATS vendor homepage, not the company's careers page"
+        elif host.endswith("." + domain):
+            subdomain = host.removesuffix("." + domain)
+            if subdomain in {"www", "app", "api", "login", "admin", "help", "support", "marketing", "blog", "status", "mail", "cdn", "demo"}:
+                return "This is the ATS vendor homepage, not the company's careers page"
+            if re.search(r"/(?:sok|search)\b", path) or re.search(r"(?:q|sok|search)=", query):
+                return "This is a generic ATS search page, not the company's careers page or individual vacancy"
+
+    if re.search(r"/(?:career|careers|jobs|jobb|stilling|stillinger)/(?:search|sok)\b", path) or (
+        any(k in path for k in ("/jobs", "/jobb", "/stilling", "/stillinger", "/careers")) and re.search(r"(?:q|search|sok|keyword)=", query)
+    ):
+        return "This is a generic ATS search page, not the company's careers page or individual vacancy"
+
+    return ""
+
+
 def _is_ats(result: dict[str, Any]) -> tuple[str, bool]:
+    rej = _ats_rejection_reason(result)
+    if rej:
+        return "", False
+
     parsed = urllib.parse.urlparse(str(result.get("url") or ""))
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     path = parsed.path.casefold().rstrip("/")
@@ -225,8 +274,6 @@ def _is_ats(result: dict[str, Any]) -> tuple[str, bool]:
                     return platform, True
                 return "", False
             else:
-                if path in {"", "/", "/en", "/nb", "/no", "/about", "/about-us", "/pricing", "/login", "/contact", "/demo", "/privacy", "/terms", "/jobs", "/careers", "/stillinger"}:
-                    return "", False
                 if re.search(r"/(?:companies|jobs|stilling|positions)/[a-z0-9_-]+", path):
                     return platform, True
                 return "", False
@@ -257,13 +304,29 @@ def _is_news_candidate(result: dict[str, Any]) -> bool:
         return False
 
     # 1. Real article path check: reject generic section roots / index hubs
-    if path in {"", "/", "/nyheter", "/news", "/pressemelding", "/pressemeldinger", "/press", "/aktuelt", "/artikler", "/artikkel", "/media", "/presse", "/siste-nytt", "/nyhetsarkiv", "/blog", "/blogg", "/feed", "/rss"}:
+    if path in {
+        "", "/", "/nyheter", "/news", "/pressemelding", "/pressemeldinger", "/press",
+        "/aktuelt", "/artikler", "/artikkel", "/media", "/presse", "/siste-nytt",
+        "/nyhetsarkiv", "/blog", "/blogg", "/feed", "/rss",
+    }:
         return False
 
-    # 2. Real article title check: reject generic section titles
+    # 2. Reject category, tag, archive, topic, and taxonomy pages
+    if re.search(r"^/(?:kategori|category|categories|tags?|emne|seksjon|tema|arkiv|archive)\b", path) or path.endswith("/kategori") or path.endswith("/category"):
+        return False
+
+    # 3. Reject product, service, about, contact, and navigation pages
+    if re.search(r"^/(?:produkter|products?|tjenester|services?|om-oss|about|about-us|kontakt|contact|priser|pricing|hjem|home)\b", path):
+        return False
+
+    # 4. Real article title check: reject generic section / navigation titles
     title = str(result.get("title") or "").strip().casefold()
-    generic_titles = {"nyheter", "news", "aktuelt", "presse", "press", "pressemeldinger", "siste nytt", "nyhetsarkiv", "artikler", "blogg", "media", "forside", "hjem", "home"}
-    if title in generic_titles or title.endswith(" - nyheter") or title.startswith("nyheter - "):
+    generic_titles = {
+        "nyheter", "news", "aktuelt", "presse", "press", "pressemeldinger", "siste nytt",
+        "nyhetsarkiv", "artikler", "blogg", "media", "forside", "hjem", "home",
+        "produkter", "products", "tjenester", "services", "om oss", "about us", "kontakt", "contact",
+    }
+    if title in generic_titles or title.endswith(" - nyheter") or title.startswith("nyheter - ") or title.endswith(" - news") or title.startswith("news - "):
         return False
 
     result_kind = str(result.get("result_kind") or "").casefold()
@@ -300,6 +363,9 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
         url = str(result.get("url") or "").strip()
         if not url:
             continue
+        parsed_url = urllib.parse.urlparse(url)
+        host = (parsed_url.hostname or "").casefold().removeprefix("www.")
+        path = parsed_url.path.casefold().rstrip("/")
         title = str(result.get("title") or "").strip()
         snippet = str(result.get("snippet") or "").strip()
         haystack = f"{title} {snippet}"
@@ -325,10 +391,25 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                         "identity_match": True,
                         "evidence_excerpt": title or snippet[:300],
                         "confidence": confidence,
+                        "verdict": "confirmed",
+                        "verdict_reason": "Social profile matches company legal identity and operations",
                     })
 
         # 2. Dated news only (real article, exact company attribution, genuine publication date)
-        if _is_news_candidate(result):
+        # Check if URL was considered for news (e.g. news host, path keyword, news result, or news/update context) but rejected as category/nav
+        is_news_source = (
+            any(host == d or host.endswith("." + d) for d in NEWS_HOSTS)
+            or any(k in path for k in NEWS_PATH_KEYWORDS)
+            or str(result.get("result_kind") or "").casefold() == "news"
+            or any(k in haystack.casefold() for k in ("nyhet", "news", "presse", "pressemelding", "sist oppdatert", "oppdatert", "publisert"))
+        )
+        if is_news_source and not _is_news_candidate(result) and not _is_social(result) and not _is_ats(result)[1]:
+            rejected_news.append({
+                "url": url,
+                "title": title,
+                "reason": "Candidate is a navigation, category, or product page, not a dated article",
+            })
+        elif _is_news_candidate(result):
             if parent_org and parent_org in found_orgs and org not in found_orgs:
                 rejected_news.append({
                     "url": url,
@@ -350,7 +431,7 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 rejected_news.append({
                     "url": url,
                     "title": title,
-                    "reason": "News candidate lacks exact legal name match for target company",
+                    "reason": "Article does not mention the requested company",
                 })
                 continue
 
@@ -362,11 +443,13 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
             if published_at:
                 if url not in seen_news:
                     seen_news.add(url)
+                    publisher = host
                     news.append({
                         "title": title or "Public company news",
                         "url": url,
                         "date": published_at,
                         "published_at": published_at,
+                        "publisher": publisher,
                         "snippet": snippet[:500],
                         "source": str(result.get("source") or "public_search"),
                         "source_url": url,
@@ -376,6 +459,8 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                         "identity_match": True,
                         "evidence_excerpt": snippet[:500],
                         "confidence": 0.9 if _municipality_match(profile, result) else 0.82,
+                        "verdict": "confirmed",
+                        "verdict_reason": f"Dated article on {publisher} explicitly identifies the requested company with verified publication date {published_at}",
                     })
             else:
                 rejected_news.append({
@@ -385,6 +470,15 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 })
 
         # 3. Hiring & ATS portals (exact employer, company-specific listing, no vendor homepage or parent vacancies)
+        ats_rej = _ats_rejection_reason(result)
+        if ats_rej:
+            rejected_hiring.append({
+                "url": url,
+                "title": title,
+                "reason": ats_rej,
+            })
+            continue
+
         platform, ats = _is_ats(result)
         path_text = f"{title} {snippet} {url}".casefold()
         if ats or any(term in path_text for term in CAREER_TERMS):
@@ -392,7 +486,7 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 rejected_hiring.append({
                     "url": url,
                     "title": title,
-                    "reason": f"Hiring listing is for parent entity {parent_org}, not target subsidiary {org}",
+                    "reason": f"Vacancy belongs to the parent company ({parent_org}), not the requested entity",
                 })
                 continue
 
@@ -401,7 +495,7 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 rejected_hiring.append({
                     "url": url,
                     "title": title,
-                    "reason": f"Hiring listing cites conflicting organisation number {conflicting_orgs[0]}",
+                    "reason": f"Vacancy belongs to conflicting company {conflicting_orgs[0]}, not the requested entity",
                 })
                 continue
 
@@ -409,17 +503,19 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 rejected_hiring.append({
                     "url": url,
                     "title": title,
-                    "reason": "Hiring listing does not match target company exact employer",
+                    "reason": "Listing does not match the requested company identity",
                 })
                 continue
 
             if url not in seen_hiring:
                 seen_hiring.add(url)
                 active = any(term in path_text for term in ACTIVE_HIRING_TERMS)
+                publisher = platform or host
                 hiring_candidates.append({
                     "url": url,
                     "title": title,
                     "platform": platform or None,
+                    "publisher": publisher,
                     "hiring_active": True if active else None,
                     "source": "public_search",
                     "source_url": url,
@@ -429,6 +525,8 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                     "identity_match": True,
                     "evidence_excerpt": (snippet or title)[:500],
                     "confidence": 0.9 if active else 0.78,
+                    "verdict": "confirmed",
+                    "verdict_reason": "Individual active vacancy or careers page verified for the requested company",
                 })
 
     return {

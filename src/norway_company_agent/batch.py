@@ -103,6 +103,8 @@ def profiles_from_bulk(
                             retrieved_at=retrieved_at,
                             content_sha256=res.content_sha256,
                             source_row_key=org,
+                            verdict="confirmed",
+                            verdict_reason="Official Enhetsregisteret statutory filing passes identity verification",
                         ),
                         "accounting_obligation": accounting_obligation_assessment(entity),
                         "locations": evidence(
@@ -114,6 +116,8 @@ def profiles_from_bulk(
                             retrieved_at=retrieved_at,
                             content_sha256=res.content_sha256,
                             source_row_key=org,
+                            verdict="confirmed" if (entity.get("business_address") or entity.get("postal_address")) else "rejected",
+                            verdict_reason="Registered business and postal address recorded in Brønnøysundregistrene" if (entity.get("business_address") or entity.get("postal_address")) else "No registered business address recorded in registry",
                         ),
                     },
                 }
@@ -131,6 +135,8 @@ def profiles_from_bulk(
                             note=res.error or "Live entity lookup failed",
                             retrieved_at=retrieved_at,
                             source_row_key=org,
+                            verdict="rejected" if res.status in {404, 410} else "unsure",
+                            verdict_reason=res.error or ("No official record found in registry" if res.status in {404, 410} else "Live entity lookup failed"),
                         ),
                         "accounting_obligation": evidence(
                             "accounting_obligation",
@@ -178,6 +184,8 @@ def profiles_from_bulk(
                 retrieved_at=retrieved_at,
                 content_sha256=snapshot_sha256,
                 source_row_key=org,
+                verdict="confirmed",
+                verdict_reason="Official Enhetsregisteret statutory filing passes identity verification",
             ),
             "accounting_obligation": accounting_obligation_assessment(profile),
             "locations": evidence(
@@ -189,6 +197,8 @@ def profiles_from_bulk(
                 retrieved_at=retrieved_at,
                 content_sha256=snapshot_sha256,
                 source_row_key=org,
+                verdict="confirmed" if has_location else "rejected",
+                verdict_reason="Registered business and postal address recorded in Brønnøysundregistrene" if has_location else "No registered business address recorded in registry",
             ),
         }
         found[org] = profile
@@ -212,6 +222,8 @@ def profiles_from_bulk(
                     retrieved_at=retrieved_at,
                     content_sha256=snapshot_sha256,
                     source_row_key=org,
+                    verdict="rejected",
+                    verdict_reason="Organisation number absent from registry snapshot",
                 ),
                 "accounting_obligation": evidence(
                     "accounting_obligation",

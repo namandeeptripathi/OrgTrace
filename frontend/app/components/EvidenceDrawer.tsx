@@ -2,23 +2,110 @@
 
 import { useState, useEffect, useRef } from "react";
 import { createPortal } from "react-dom";
-
-interface EvidenceRecord {
-  field: string;
-  status: string;
-  source_type: string;
-  source_class: string;
-  source_url: string;
-  retrieved_at: string;
-  value?: Record<string, unknown>;
-  note?: string;
-}
+import type { EvidenceRecord, SourceVerdict } from "../lib/types";
 
 interface EvidenceDrawerProps {
   evidence: EvidenceRecord | null;
   fieldLabel: string;
   fieldValue: string;
   onClose: () => void;
+}
+
+export interface SourceVerdictInfo {
+  verdict: SourceVerdict;
+  label: string;
+  reason: string;
+  badgeClass: string;
+  icon: string;
+  themeColor: string;
+  bgColor: string;
+  borderColor: string;
+}
+
+export function resolveSourceVerdict(evidence: EvidenceRecord | null): SourceVerdictInfo {
+  if (!evidence) {
+    return {
+      verdict: "rejected",
+      label: "Rejected",
+      reason: "Source fails verification; never use it to support a published fact.",
+      badgeClass: "badge-red",
+      icon: "✕",
+      themeColor: "var(--accent-red)",
+      bgColor: "rgba(239, 68, 68, 0.08)",
+      borderColor: "rgba(239, 68, 68, 0.25)",
+    };
+  }
+
+  // 1. Explicit verdict on evidence record
+  let verdict: SourceVerdict;
+  if (evidence.verdict === "confirmed" || evidence.verdict === "unsure" || evidence.verdict === "rejected") {
+    verdict = evidence.verdict;
+  } else if (evidence.status === "available") {
+    verdict = "confirmed";
+  } else if (evidence.status === "not_found" || evidence.status === "not_applicable") {
+    verdict = "rejected";
+  } else {
+    // timeout, rate_limited, unavailable, not_attempted, blocked_*, parse_failed
+    verdict = "unsure";
+  }
+
+  // 2. Short, specific non-fabricated reason
+  let reason = evidence.verdict_reason || evidence.rejection_reason || evidence.note;
+  if (!reason) {
+    if (verdict === "confirmed") {
+      const src = (evidence.source_type || evidence.source_class || "").toLowerCase();
+      if (src.includes("registry")) {
+        reason = "Official Enhetsregisteret statutory filing passes identity verification.";
+      } else if (src.includes("website")) {
+        reason = "Exact legal company name found on the company's own website.";
+      } else if (src.includes("news")) {
+        reason = "Dated article explicitly mentions requested company with verified publication date.";
+      } else if (src.includes("career") || src.includes("hiring")) {
+        reason = "Individual active vacancy or careers page verified for the requested company.";
+      } else {
+        reason = "Source supports the associated company fact and passes verification.";
+      }
+    } else if (verdict === "rejected") {
+      reason = "Source fails verification; never use it to support a published fact.";
+    } else {
+      reason = "Evidence is inconclusive or conflicting; do not publish it as a confirmed fact.";
+    }
+  }
+
+  if (verdict === "confirmed") {
+    return {
+      verdict,
+      label: "Confirmed",
+      reason,
+      badgeClass: "badge-green",
+      icon: "✓",
+      themeColor: "var(--accent-green)",
+      bgColor: "rgba(34, 197, 94, 0.08)",
+      borderColor: "rgba(34, 197, 94, 0.25)",
+    };
+  } else if (verdict === "unsure") {
+    return {
+      verdict,
+      label: "Unsure",
+      reason,
+      badgeClass: "badge-amber",
+      icon: "?",
+      themeColor: "var(--accent-amber)",
+      bgColor: "rgba(245, 158, 11, 0.08)",
+      borderColor: "rgba(245, 158, 11, 0.25)",
+    };
+  } else {
+    return {
+      verdict,
+      label: "Rejected",
+      reason,
+      badgeClass: "badge-red",
+      icon: "✕",
+      themeColor: "var(--accent-red)",
+      bgColor: "rgba(239, 68, 68, 0.08)",
+      borderColor: "rgba(239, 68, 68, 0.25)",
+    };
+  }
 }
 
 function formatDateTime(iso: string | null | undefined): string {
@@ -44,15 +131,17 @@ function verificationState(status: string): {
 } {
   switch (status) {
     case "available":
-      return { icon: "✓", label: "Verified", className: "badge-green" };
+      return { icon: "✓", label: "Available", className: "badge-green" };
     case "not_found":
+    case "not_applicable":
+      return { icon: "✕", label: "Not Found", className: "badge-neutral" };
     case "not_attempted":
-      return { icon: "—", label: "Unavailable", className: "badge-neutral" };
+      return { icon: "—", label: "Not Attempted", className: "badge-neutral" };
     case "timeout":
     case "rate_limited":
-      return { icon: "⚠", label: "Partial", className: "badge-amber" };
+      return { icon: "⚠", label: "Rate Limited / Timeout", className: "badge-amber" };
     default:
-      return { icon: "⚠", label: "Partial", className: "badge-amber" };
+      return { icon: "⚠", label: status, className: "badge-amber" };
   }
 }
 
@@ -68,7 +157,6 @@ export function EvidenceDrawer({
 
   useEffect(() => {
     setMounted(true);
-    // Animate in
     requestAnimationFrame(() => setIsVisible(true));
 
     function handleKeyDown(e: KeyboardEvent) {
@@ -82,6 +170,7 @@ export function EvidenceDrawer({
     if (e.target === e.currentTarget) onClose();
   }
 
+  const verdictInfo = resolveSourceVerdict(evidence);
   const verification = evidence
     ? verificationState(evidence.status)
     : { icon: "—", label: "Unavailable", className: "badge-neutral" };
@@ -111,7 +200,7 @@ export function EvidenceDrawer({
       <div
         ref={drawerRef}
         style={{
-          width: "min(440px, 100vw)",
+          width: "min(460px, 100vw)",
           height: "100%",
           background: "var(--bg-secondary)",
           borderLeft: "1px solid var(--border-default)",
@@ -138,17 +227,19 @@ export function EvidenceDrawer({
             zIndex: 10,
           }}
         >
-          <h2
-            style={{
-              fontSize: "1rem",
-              fontWeight: 600,
-              letterSpacing: "-0.01em",
-              color: "var(--text-primary)",
-              margin: 0,
-            }}
-          >
-            Evidence Inspector
-          </h2>
+          <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+            <h2
+              style={{
+                fontSize: "1rem",
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                color: "var(--text-primary)",
+                margin: 0,
+              }}
+            >
+              Evidence Inspector
+            </h2>
+          </div>
           <button
             onClick={onClose}
             aria-label="Close evidence drawer"
@@ -182,7 +273,7 @@ export function EvidenceDrawer({
           }}
         >
           {/* Fact being inspected */}
-          <div style={{ marginBottom: "24px" }}>
+          <div style={{ marginBottom: "20px" }}>
             <div
               className="text-caption"
               style={{
@@ -199,27 +290,76 @@ export function EvidenceDrawer({
                 fontWeight: 600,
                 color: "var(--text-primary)",
                 marginBottom: "10px",
+                wordBreak: "break-word",
               }}
             >
               {fieldValue || "—"}
             </div>
-            <span className={`badge ${verification.className}`}>
-              {verification.icon} {verification.label}
-            </span>
+          </div>
+
+          {/* Prominent Source-Level Verdict Card */}
+          <div
+            style={{
+              padding: "16px",
+              borderRadius: "var(--radius-md)",
+              border: `1px solid ${verdictInfo.borderColor}`,
+              background: verdictInfo.bgColor,
+              marginBottom: "24px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                marginBottom: "8px",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "0.75rem",
+                  fontWeight: 700,
+                  textTransform: "uppercase",
+                  letterSpacing: "0.08em",
+                  color: verdictInfo.themeColor,
+                }}
+              >
+                Source-Level Verdict
+              </span>
+              <span className={`badge ${verdictInfo.badgeClass}`}>
+                {verdictInfo.icon} {verdictInfo.label}
+              </span>
+            </div>
+            <div
+              style={{
+                fontSize: "0.875rem",
+                lineHeight: 1.5,
+                color: "var(--text-primary)",
+                fontWeight: 500,
+              }}
+            >
+              {verdictInfo.reason}
+            </div>
           </div>
 
           {/* Evidence details */}
           {evidence ? (
             <div style={{ display: "grid", gap: "20px" }}>
-              {/* Source */}
-              <DrawerSection title="Source">
+              {/* Source Details */}
+              <DrawerSection title="Source Attribution">
                 <DrawerRow
                   label="Source Type"
                   value={evidence.source_class || evidence.source_type}
                 />
                 <DrawerRow label="Status" value={evidence.status} />
+                {evidence.publisher && (
+                  <DrawerRow label="Publisher" value={evidence.publisher} />
+                )}
+                {evidence.source_title && (
+                  <DrawerRow label="Title" value={evidence.source_title} />
+                )}
                 {evidence.source_url && (
-                  <div style={{ marginTop: "8px" }}>
+                  <div style={{ marginTop: "12px" }}>
                     <a
                       href={evidence.source_url}
                       target="_blank"
@@ -230,6 +370,7 @@ export function EvidenceDrawer({
                         fontSize: "0.8125rem",
                         padding: "8px 14px",
                         display: "inline-flex",
+                        alignItems: "center",
                         gap: "6px",
                       }}
                     >
@@ -240,15 +381,34 @@ export function EvidenceDrawer({
               </DrawerSection>
 
               {/* Retrieval */}
-              <DrawerSection title="Retrieved">
+              <DrawerSection title="Retrieval">
                 <DrawerRow
                   label="Timestamp"
                   value={formatDateTime(evidence.retrieved_at)}
                 />
               </DrawerSection>
 
-              {/* Note */}
-              {evidence.note && (
+              {/* Evidence Excerpt */}
+              {evidence.evidence_excerpt && (
+                <DrawerSection title="Supporting Evidence Excerpt">
+                  <div
+                    style={{
+                      padding: "10px 14px",
+                      background: "var(--bg-elevated)",
+                      borderRadius: "var(--radius-sm)",
+                      border: "1px solid var(--border-subtle)",
+                      fontSize: "0.8125rem",
+                      color: "var(--text-secondary)",
+                      lineHeight: 1.5,
+                    }}
+                  >
+                    “{evidence.evidence_excerpt}”
+                  </div>
+                </DrawerSection>
+              )}
+
+              {/* Note (if distinct from verdict reason) */}
+              {evidence.note && evidence.note !== verdictInfo.reason && (
                 <DrawerSection title="Note">
                   <div
                     style={{
@@ -380,6 +540,7 @@ function DrawerRow({
         justifyContent: "space-between",
         alignItems: "center",
         padding: "6px 0",
+        gap: "12px",
       }}
     >
       <span
@@ -393,6 +554,8 @@ function DrawerRow({
           color: "var(--text-primary)",
           fontSize: "0.8125rem",
           fontWeight: 500,
+          textAlign: "right",
+          wordBreak: "break-word",
         }}
       >
         {value}

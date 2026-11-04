@@ -1,18 +1,8 @@
 "use client";
 
 import { useState } from "react";
-import { EvidenceDrawer } from "./EvidenceDrawer";
-
-interface EvidenceRecord {
-  field: string;
-  status: string;
-  source_type: string;
-  source_class: string;
-  source_url: string;
-  retrieved_at: string;
-  value?: Record<string, unknown>;
-  note?: string;
-}
+import { EvidenceDrawer, resolveSourceVerdict } from "./EvidenceDrawer";
+import type { EvidenceRecord } from "../lib/types";
 
 interface ExplanationField {
   field_name: string;
@@ -145,66 +135,80 @@ export function CompanyInteractive({
         )}
         <div className="surface-elevated" style={{ padding: "24px" }}>
           <div className="evidence-chain">
-            {Object.entries(evidence || {}).map(([key, ev]) => (
-              <button
-                key={key}
-                className="evidence-node evidence-clickable"
-                onClick={() => openDrawer(key, ev)}
-                aria-label={`Inspect evidence for ${key.replace(/_/g, " ")}`}
-                style={{
-                  display: "block",
-                  width: "100%",
-                  textAlign: "left",
-                  background: "none",
-                  border: "none",
-                  cursor: "pointer",
-                  fontFamily: "inherit",
-                  color: "inherit",
-                  padding: "12px 0",
-                  borderRadius: "var(--radius-sm)",
-                  transition: "background var(--transition-fast)",
-                }}
-              >
-                <div
+            {Object.entries(evidence || {}).map(([key, ev]) => {
+              const verdictInfo = resolveSourceVerdict(ev);
+              return (
+                <button
+                  key={key}
+                  className="evidence-node evidence-clickable"
+                  onClick={() => openDrawer(key, ev)}
+                  aria-label={`Inspect evidence for ${key.replace(/_/g, " ")}`}
                   style={{
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "space-between",
-                    gap: "12px",
-                    marginBottom: "6px",
+                    display: "block",
+                    width: "100%",
+                    textAlign: "left",
+                    background: "none",
+                    border: "none",
+                    cursor: "pointer",
+                    fontFamily: "inherit",
+                    color: "inherit",
+                    padding: "12px 0",
+                    borderRadius: "var(--radius-sm)",
+                    transition: "background var(--transition-fast)",
                   }}
                 >
-                  <span
-                    className="text-subheading"
-                    style={{ textTransform: "capitalize" }}
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "space-between",
+                      gap: "12px",
+                      marginBottom: "6px",
+                    }}
                   >
-                    {key.replace(/_/g, " ")}
-                  </span>
-                  <span
-                    className={`badge badge-${evidenceBadgeVariant(ev.status)}`}
-                  >
-                    {statusLabel(ev.status)}
-                  </span>
-                </div>
-                <div className="text-caption">
-                  Source:{" "}
-                  <span style={{ color: "var(--text-accent)" }}>
-                    {ev.source_type}
-                  </span>
-                </div>
-                <div className="text-caption">
-                  Retrieved: {formatDateTime(ev.retrieved_at)}
-                </div>
-                {ev.note && (
+                    <span
+                      className="text-subheading"
+                      style={{ textTransform: "capitalize" }}
+                    >
+                      {key.replace(/_/g, " ")}
+                    </span>
+                    <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+                      <span className={`badge ${verdictInfo.badgeClass}`}>
+                        {verdictInfo.icon} {verdictInfo.label}
+                      </span>
+                      <span
+                        className={`badge badge-${evidenceBadgeVariant(ev.status)}`}
+                      >
+                        {statusLabel(ev.status)}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="text-caption">
+                    Source:{" "}
+                    <span style={{ color: "var(--text-accent)" }}>
+                      {ev.source_type}
+                    </span>
+                  </div>
+                  <div className="text-caption">
+                    Retrieved: {formatDateTime(ev.retrieved_at)}
+                  </div>
                   <div
                     className="text-caption"
-                    style={{ color: "var(--accent-amber)", marginTop: "4px" }}
+                    style={{ color: "var(--text-secondary)", marginTop: "4px", fontSize: "0.8125rem" }}
                   >
-                    ⚠ {ev.note}
+                    Verdict: {verdictInfo.reason}
                   </div>
-                )}
-              </button>
-            ))}
+                  {ev.note && ev.note !== verdictInfo.reason && (
+                    <div
+                      className="text-caption"
+                      style={{ color: "var(--accent-amber)", marginTop: "4px" }}
+                    >
+                      ⚠ {ev.note}
+                    </div>
+                  )}
+                </button>
+              );
+            })}
           </div>
         </div>
       </section>
@@ -369,8 +373,8 @@ function MiniStat({
 /** Map an explanation field name to the closest evidence key */
 function findMatchingEvidence(
   fieldName: string,
-  evidence: Record<string, { field: string; status: string; source_type: string; source_class: string; source_url: string; retrieved_at: string; value?: Record<string, unknown>; note?: string }>
-): (typeof evidence)[string] | null {
+  evidence: Record<string, EvidenceRecord>
+): EvidenceRecord | null {
   // Direct match
   if (evidence[fieldName]) return evidence[fieldName];
 

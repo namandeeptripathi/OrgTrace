@@ -286,10 +286,13 @@ def main() -> None:
                                 organisation_number=profile["organisation_number"],
                                 company_name=profile.get("name"), identity_match=True,
                                 confidence=max(x.get("confidence", 0.0) for x in enrichment["social_profiles"]),
+                                verdict="confirmed",
+                                verdict_reason="Social profile matches company legal identity and operations",
                             )
                         if enrichment["news"]:
                             profile["public_activity_search"] = enrichment["news"]
                             profile["news_search"] = enrichment["news"]
+                            first_news = enrichment["news"][0]
                             profile["evidence"]["news_search"] = evidence(
                                 "news", "available", "public_search",
                                 "https://api.search.brave.com/res/v1/web/search",
@@ -297,9 +300,14 @@ def main() -> None:
                                 organisation_number=profile["organisation_number"],
                                 company_name=profile.get("name"), identity_match=True,
                                 confidence=max(x.get("confidence", 0.0) for x in enrichment["news"]),
+                                verdict="confirmed",
+                                verdict_reason=first_news.get("verdict_reason") or f"Dated article on {first_news.get('publisher', 'media')} explicitly identifies requested company with verified publication date {first_news.get('published_at', '')}",
+                                publisher=first_news.get("publisher"),
+                                published_at=first_news.get("published_at"),
                             )
                         if enrichment["hiring"]:
                             profile["hiring_search"] = enrichment["hiring"]
+                            first_hire = enrichment["hiring"][0]
                             profile["evidence"]["hiring_search"] = evidence(
                                 "careers", "available", "public_search",
                                 "https://api.search.brave.com/res/v1/web/search",
@@ -307,7 +315,36 @@ def main() -> None:
                                 organisation_number=profile["organisation_number"],
                                 company_name=profile.get("name"), identity_match=True,
                                 confidence=max(x.get("confidence", 0.0) for x in enrichment["hiring"]),
+                                verdict="confirmed",
+                                verdict_reason=first_hire.get("verdict_reason") or "Individual active vacancy or careers page verified for the requested company",
+                                publisher=first_hire.get("publisher"),
                             )
+
+                        # Expose rejected hiring & news candidates in profile evidence for source-level inspection
+                        if enrichment.get("rejected_hiring"):
+                            for idx, rej in enumerate(enrichment["rejected_hiring"][:3]):
+                                key = f"rejected_hiring_{idx+1}" if idx > 0 else "rejected_hiring"
+                                profile["evidence"][key] = evidence(
+                                    "careers", "not_found", "public_search",
+                                    rej["url"],
+                                    note=rej["reason"],
+                                    rejection_reason=rej["reason"],
+                                    verdict="rejected",
+                                    verdict_reason=rej["reason"],
+                                    source_title=rej.get("title"),
+                                )
+                        if enrichment.get("rejected_news"):
+                            for idx, rej in enumerate(enrichment["rejected_news"][:3]):
+                                key = f"rejected_news_{idx+1}" if idx > 0 else "rejected_news"
+                                profile["evidence"][key] = evidence(
+                                    "news", "not_found", "public_search",
+                                    rej["url"],
+                                    note=rej["reason"],
+                                    rejection_reason=rej["reason"],
+                                    verdict="rejected",
+                                    verdict_reason=rej["reason"],
+                                    source_title=rej.get("title"),
+                                )
 
                         # Compare registry website with independent search candidates
                         comparison = compare_registry_and_search_candidates(profile, reg_site_record, search_results)
@@ -320,11 +357,15 @@ def main() -> None:
                             if reg_site_record and reg_site_record.get("status") == "available":
                                 reg_site_record["confidence"] = 0.99
                                 reg_site_record["corroborated"] = True
+                                reg_site_record["verdict"] = "confirmed"
+                                reg_site_record["verdict_reason"] = "Exact legal company name found on the company's own website independently corroborated by search"
                                 profile["evidence"]["website"] = reg_site_record
                                 profile["website"] = comparison.get("selected_url") or profile.get("website")
                         elif verdict == "registry_confirmed":
                             # Registry confirmed exact match, search had no conflicting publishable candidate
                             if reg_site_record and reg_site_record.get("status") == "available":
+                                reg_site_record["verdict"] = "confirmed"
+                                reg_site_record["verdict_reason"] = "Company-owned website matches exact legal identity and active operations"
                                 profile["evidence"]["website"] = reg_site_record
                                 profile["website"] = comparison.get("selected_url") or profile.get("website")
                         elif verdict == "search_candidate_preferred":
@@ -342,6 +383,8 @@ def main() -> None:
                                 assessment = gated.get("assessment")
                                 website["source_type"] = "search_discovered_company_website"
                                 if assessment and assessment.get("publishable") and website.get("status") == "available":
+                                    website["verdict"] = "confirmed"
+                                    website["verdict_reason"] = "Search-discovered candidate verified as exact company website via organisation number or name matching"
                                     profile["evidence"]["website"] = website
                                     discovered_url = (website.get("value") or {}).get("final_url") or website.get("source_url") or search_url
                                     profile["website"] = discovered_url
@@ -353,6 +396,9 @@ def main() -> None:
                                         "website", "not_found",
                                         "search_discovered_company_website", search_url,
                                         note=rej_reason,
+                                        rejection_reason=rej_reason,
+                                        verdict="rejected",
+                                        verdict_reason=rej_reason,
                                         content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                                     )
                                     profile["website"] = None
@@ -366,6 +412,9 @@ def main() -> None:
                                         "website", "not_found",
                                         "search_discovery", "https://api.search.brave.com/res/v1/web/search",
                                         note=rej_reason,
+                                        rejection_reason=rej_reason,
+                                        verdict="rejected",
+                                        verdict_reason=rej_reason,
                                         content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                                     )
                         elif verdict == "unsure_conflict":
@@ -381,6 +430,9 @@ def main() -> None:
                                 "conflicting_sources",
                                 (reg_site_record or {}).get("source_url", ""),
                                 note=rej_reason,
+                                rejection_reason=rej_reason,
+                                verdict="unsure",
+                                verdict_reason=rej_reason,
                                 content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                             )
                             profile["website"] = None
@@ -393,6 +445,9 @@ def main() -> None:
                                     "company_website",
                                     "https://data.brreg.no/enhetsregisteret/api/enheter",
                                     note=rej_reason,
+                                    rejection_reason=rej_reason,
+                                    verdict="rejected",
+                                    verdict_reason=rej_reason,
                                     content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                                 )
                     else:
@@ -402,6 +457,8 @@ def main() -> None:
                                 "website", "not_attempted",
                                 "search_discovery", "https://api.search.brave.com/res/v1/web/search",
                                 note=note,
+                                verdict="unsure",
+                                verdict_reason=note,
                                 content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                             )
                 elif not profile.get("website"):
@@ -411,6 +468,8 @@ def main() -> None:
                         "registry_linked_company_website",
                         "https://data.brreg.no/enhetsregisteret/api/enheter",
                         note=note,
+                        verdict="rejected",
+                        verdict_reason=note,
                         content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                     )
 

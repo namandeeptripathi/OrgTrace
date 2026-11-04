@@ -42,6 +42,9 @@ class Evidence:
     confidence: float | None = None
     validation_status: str | None = None
     rejection_reason: str | None = None
+    verdict: str | None = None
+    verdict_reason: str | None = None
+    publisher: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -69,6 +72,9 @@ def evidence(
     confidence: float | None = None,
     validation_status: str | None = None,
     rejection_reason: str | None = None,
+    verdict: str | None = None,
+    verdict_reason: str | None = None,
+    publisher: str | None = None,
 ) -> dict[str, Any]:
     return Evidence(
         field=field,
@@ -92,5 +98,8 @@ def evidence(
         confidence=confidence,
         validation_status=validation_status,
         rejection_reason=rejection_reason,
+        verdict=verdict,
+        verdict_reason=verdict_reason,
+        publisher=publisher,
     ).to_dict()
 

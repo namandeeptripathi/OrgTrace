@@ -60,6 +60,8 @@ def accounting_obligation_assessment(profile: dict[str, Any]) -> dict[str, Any]:
         as_of="2024-08-09",
         content_sha256=ruleset_hash,
         source_row_key=str(profile.get("organisation_number") or "") or None,
+        verdict="confirmed",
+        verdict_reason="Official statutory accounting obligation determined according to Regnskapsloven § 1-2",
     )
 
 
@@ -170,21 +172,89 @@ def normalize_entity(body: Any) -> dict[str, Any]:
     }
 
 
+def _official_verdict_reason(field: str) -> str:
+    if "financial" in field:
+        return "Annual statutory financial statement verified from Regnskapsregisteret"
+    if field == "roles":
+        return "Official management and board roles verified from Enhetsregisteret"
+    if field == "locations":
+        return "Registered business and postal address recorded in Brønnøysundregistrene"
+    if field == "group":
+        return "Official corporate group structure verified from Enhetsregisteret"
+    return "Official Enhetsregisteret statutory filing passes identity verification"
+
+
 def _classified(field: str, source_type: str, result: FetchResult, value: Any = None) -> dict[str, Any]:
     if result.status == 200 and not result.error:
-        return evidence(field, "available", source_type, result.url, value=result.body if value is None else value, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "available", source_type, result.url,
+            value=result.body if value is None else value,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="confirmed",
+            verdict_reason=_official_verdict_reason(field),
+        )
     if result.status in {404, 410}:
-        return evidence(field, "not_found", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "not_found", source_type, result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="rejected",
+            verdict_reason=result.error or f"No official {field} record found in registry",
+        )
     if result.status == 429:
-        return evidence(field, "rate_limited", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "rate_limited", source_type, result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="unsure",
+            verdict_reason=result.error or "Rate limit exceeded during official registry retrieval",
+        )
     err = str(result.error or "").lower()
     if "timeout" in err or "timed out" in err:
-        return evidence(field, "timeout", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "timeout", source_type, result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="unsure",
+            verdict_reason=result.error or "Request timed out during official registry retrieval",
+        )
     if "budget" in err or "exhausted" in err:
-        return evidence(field, "not_attempted", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "not_attempted", source_type, result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="unsure",
+            verdict_reason=result.error or "Execution budget exhausted before module retrieval",
+        )
     if "jsondecodeerror" in err or "parse" in err:
-        return evidence(field, "parse_failed", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
-    return evidence(field, "unavailable", source_type, result.url, note=result.error, content_sha256=result.content_sha256, retrieved_at=result.retrieved_at, effective_at=result.effective_at)
+        return evidence(
+            field, "parse_failed", source_type, result.url,
+            note=result.error,
+            content_sha256=result.content_sha256,
+            retrieved_at=result.retrieved_at,
+            effective_at=result.effective_at,
+            verdict="unsure",
+            verdict_reason=result.error or "Parse failed on official registry response",
+        )
+    return evidence(
+        field, "unavailable", source_type, result.url,
+        note=result.error,
+        content_sha256=result.content_sha256,
+        retrieved_at=result.retrieved_at,
+        effective_at=result.effective_at,
+        verdict="unsure",
+        verdict_reason=result.error or "Official registry data unavailable",
+    )
 
 
 def fetch_official_modules(

@@ -694,5 +694,249 @@ class DualPathEnrichmentRegressionTests(unittest.TestCase):
         self.assertEqual(web_fact.value, "https://gamma.no")
 
 
+class EvaluatorPrioritiesComprehensiveTests(unittest.TestCase):
+    """Priority 1-7: Comprehensive deterministic tests covering all evaluator requirements."""
+
+    def test_01_correct_company_website_confirmed(self):
+        """1. Correct company website confirmed with exact entity identity proof."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Eksempel Tech AS",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://eksempeltech.no",
+                    value={
+                        "final_url": "https://eksempeltech.no",
+                        "title": "Eksempel Tech AS - Offisiell nettside",
+                        "main_text": "Eksempel Tech AS leverer programvare. Org.nr: 999 888 777 MVA.",
+                    },
+                )
+            },
+        }
+        assessment = assess_website_identity(profile)
+        self.assertTrue(assessment["publishable"])
+        self.assertEqual(assessment["status"], "exact")
+
+    def test_02_parent_group_website_not_incorrectly_accepted(self):
+        """2. Parent/group website not incorrectly attributed to subsidiary."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Datterforetak AS",
+            "overordnetEnhet": "912345688",
+            "evidence": {
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website", "https://morselskap.no",
+                    value={
+                        "final_url": "https://morselskap.no",
+                        "title": "Morselskap Konsern ASA",
+                        "main_text": "Morselskap Konsern ASA er holdingselskapet. Org.nr: 912 345 688 MVA.",
+                    },
+                )
+            },
+        }
+        assessment = assess_website_identity(profile)
+        self.assertFalse(assessment["publishable"])
+        self.assertEqual(assessment["status"], "parent_attribution")
+
+    def test_03_similar_name_company_rejected(self):
+        """3. Similar-name company or brand rejected when exact tokens or org nr conflict."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Nordic Solutions Consulting AS",
+        }
+        # Result mentioning Nordic Solutions ASA but conflicting org number
+        result_conflicting = {
+            "url": "https://nordicsolutions.com",
+            "title": "Nordic Solutions ASA",
+            "snippet": "Nordic Solutions ASA (org.nr 980123456) er et uavhengig selskap.",
+        }
+        enrichment = extract_search_enrichment(profile, [result_conflicting], retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["hiring"]), 0)
+        self.assertEqual(len(enrichment["news"]), 0)
+
+    def test_04_genuine_individual_ats_vacancy_accepted(self):
+        """4. Genuine individual ATS vacancy accepted with exact employer matching."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Acme Software AS",
+        }
+        results = [
+            {
+                "url": "https://acme-software.teamtailor.com/jobs/456789-senior-python-utvikler",
+                "title": "Senior Python Utvikler hos Acme Software AS",
+                "snippet": "Acme Software AS søker nå etter en dyktig utvikler i Oslo.",
+            }
+        ]
+        enrichment = extract_search_enrichment(profile, results, retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["hiring"]), 1)
+        item = enrichment["hiring"][0]
+        self.assertEqual(item["platform"], "Teamtailor")
+        self.assertEqual(item["verdict"], "confirmed")
+        self.assertIn("Individual active vacancy", item["verdict_reason"])
+
+    def test_05_generic_ats_homepage_and_search_portal_rejected(self):
+        """5. Generic ATS vendor homepages and search portals rejected with specific reasons."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Acme Software AS",
+        }
+        vendor_homepages = [
+            {"url": "https://teamtailor.com", "title": "Teamtailor ATS Homepage"},
+            {"url": "https://www.reachmee.com/about", "title": "ReachMee Talent Software"},
+            {"url": "https://jobbnorge.no/ledige-stillinger/sok", "title": "Ledige stillinger - Jobbnorge Søk"},
+            {"url": "https://finn.no/jobb/stilling/sok.html?q=utvikler", "title": "FINN Jobb Søk"},
+        ]
+        enrichment = extract_search_enrichment(profile, vendor_homepages, retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["hiring"]), 0)
+        self.assertEqual(len(enrichment["rejected_hiring"]), len(vendor_homepages))
+        reasons = [r["reason"] for r in enrichment["rejected_hiring"]]
+        self.assertTrue(any("ATS vendor homepage" in r for r in reasons))
+        self.assertTrue(any("generic ATS search page" in r for r in reasons))
+
+    def test_06_parent_or_franchise_wide_vacancy_rejected(self):
+        """6. Parent-company or franchise vacancy rejected when requested company is subsidiary."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Nordic Sub AS",
+            "overordnetEnhet": "912345688",
+        }
+        parent_vacancy = {
+            "url": "https://recman.no/jobs/parent-holding-leder",
+            "title": "Avdelingsleder hos Nordic Parent Group",
+            "snippet": "Nordic Parent Group (org.nr 912345688) rekrutterer til konsernledelsen.",
+        }
+        enrichment = extract_search_enrichment(profile, [parent_vacancy], retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["hiring"]), 0)
+        self.assertEqual(len(enrichment["rejected_hiring"]), 1)
+        self.assertIn("parent company", enrichment["rejected_hiring"][0]["reason"])
+
+    def test_07_dated_article_naming_company_accepted(self):
+        """7. Dated news article naming the company accepted with publisher and publication date."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Solar Energy AS",
+        }
+        results = [
+            {
+                "url": "https://e24.no/energi/i/xyz987/solar-energy-as-apner-ny-park",
+                "title": "Solar Energy AS åpner ny solcellepark i Innlandet",
+                "snippet": "Solar Energy AS investerer 150 millioner i Innlandet.",
+                "published_at": "2024-06-20",
+            }
+        ]
+        enrichment = extract_search_enrichment(profile, results, retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["news"]), 1)
+        article = enrichment["news"][0]
+        self.assertEqual(article["published_at"], "2024-06-20")
+        self.assertEqual(article["publisher"], "e24.no")
+        self.assertEqual(article["verdict"], "confirmed")
+        self.assertIn("e24.no", article["verdict_reason"])
+
+    def test_08_undated_or_unrelated_article_rejected(self):
+        """8. Undated pages and unrelated company articles rejected without publication."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Solar Energy AS",
+        }
+        undated = {
+            "url": "https://solarenergy.no/tjenester",
+            "title": "Våre tjenester - Solar Energy AS",
+            "snippet": "Sist oppdatert: 2024-05-01. Vi tilbyr solcelleinstallasjon.",
+        }
+        unrelated = {
+            "url": "https://e24.no/bors/i/111/annen-bedrift-rekord",
+            "title": "Annen Bedrift ASA melder om rekordvekst",
+            "snippet": "Publisert 2024-05-01. Annen Bedrift ASA vokser videre.",
+            "published_at": "2024-05-01",
+        }
+        enrichment = extract_search_enrichment(profile, [undated, unrelated], retrieved_at="2026-11-04T00:00:00Z")
+        self.assertEqual(len(enrichment["news"]), 0)
+        self.assertEqual(len(enrichment["rejected_news"]), 2)
+
+    def test_09_rejected_and_unsure_evidence_never_leaks_into_published_claims(self):
+        """9. Unsure and rejected facts remain strictly segregated from published claims."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Testbed AS",
+            "website": None,
+            "evidence": {
+                "website": evidence(
+                    "website", "not_found", "search_discovered_company_website",
+                    "https://parentcorp.com",
+                    note="parent_attribution: captured page cites parent organisation number",
+                    rejection_reason="parent_attribution",
+                    verdict="rejected",
+                    verdict_reason="Website belongs to parent company, not the requested entity",
+                ),
+            },
+            "rejected_evidence": {
+                "website": {"url": "https://parentcorp.com", "reason": "parent_attribution"},
+                "hiring": [{"url": "https://teamtailor.com", "reason": "ATS vendor homepage"}],
+            },
+            "unsure_evidence": {
+                "website": {"status": "ambiguous", "reason": "Conflicting domain names without conclusive proof"},
+            },
+        }
+        unified = build_unified_company_profile(profile)
+        envelope = unified.to_contract_envelope()
+
+        # Claims must have 29 entries and website must be not_available
+        self.assertEqual(len(envelope["claims"]), 29)
+        web_claim = next(c for c in envelope["claims"] if c["field"] == "website")
+        self.assertEqual(web_claim["availability"], "not_available")
+        self.assertIsNone(web_claim["value"])
+
+        # Rejected facts must contain the rejected website
+        self.assertTrue(len(envelope.get("rejected_facts", [])) > 0)
+        self.assertTrue(any(r["field"] == "website" for r in envelope["rejected_facts"]))
+
+        # Unsure facts must contain the unsure record
+        self.assertTrue(len(envelope.get("unsure_facts", [])) > 0)
+
+    def test_10_verdict_and_reason_attached_to_sources_and_reaches_frontend_model(self):
+        """10. Verdict (confirmed/unsure/rejected) and reason are attached to sources."""
+        rec_conf = evidence(
+            "registry", "available", "official_registry_bulk", "https://data.brreg.no/csv",
+            verdict="confirmed", verdict_reason="Official Enhetsregisteret statutory filing passes identity verification"
+        )
+        rec_rej = evidence(
+            "careers", "not_found", "public_search", "https://teamtailor.com",
+            verdict="rejected", verdict_reason="This is the ATS vendor homepage, not the company's careers page"
+        )
+        rec_unsure = evidence(
+            "website", "not_found", "conflicting_sources", "https://conflict.no",
+            verdict="unsure", verdict_reason="Registry domain and search domain conflict without conclusive proof"
+        )
+        self.assertEqual(rec_conf["verdict"], "confirmed")
+        self.assertEqual(rec_rej["verdict"], "rejected")
+        self.assertEqual(rec_unsure["verdict"], "unsure")
+        self.assertIn("Official Enhetsregisteret", rec_conf["verdict_reason"])
+        self.assertIn("ATS vendor homepage", rec_rej["verdict_reason"])
+        self.assertIn("Registry domain and search domain conflict", rec_unsure["verdict_reason"])
+
+    def test_11_terminal_envelope_backward_compatibility_preserved(self):
+        """11. Terminal envelope schema preserves 29 categories, run metadata, operations, and claims."""
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Compat AS",
+            "evidence": {
+                "registry": evidence("registry", "available", "official_registry_bulk", "https://data.brreg.no/csv"),
+            },
+        }
+        from norway_company_agent.batch import terminal_envelope
+        env = terminal_envelope(
+            profile, run_id="run-compat-test", modules=["registry", "website"],
+            started_at="2026-11-04T00:00:00Z", completed_at="2026-11-04T00:00:05Z"
+        )
+        self.assertIn("claims", env)
+        self.assertEqual(len(env["claims"]), 29)
+        self.assertIn("rejected_facts", env)
+        self.assertIn("unsure_facts", env)
+        self.assertIn("run", env)
+        self.assertEqual(env["run"]["run_id"], "run-compat-test")
+        self.assertIn("operations", env)
+        self.assertIn("state", env)
+
+
 if __name__ == "__main__":
     unittest.main()

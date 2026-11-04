@@ -14,15 +14,27 @@ export interface ShareCapital {
   shares: number;
 }
 
+export type SourceVerdict = "confirmed" | "unsure" | "rejected";
+
 export interface EvidenceRecord {
   field: string;
-  status: "available" | "unavailable" | "timeout" | "rate_limited" | "not_found" | "parse_failed" | "not_attempted" | "blocked_policy" | "blocked_robots";
+  status: "available" | "unavailable" | "timeout" | "rate_limited" | "not_found" | "not_applicable" | "parse_failed" | "not_attempted" | "blocked" | "blocked_policy" | "blocked_robots" | string;
   source_type: string;
   source_class: string;
   source_url: string;
   retrieved_at: string;
   value?: Record<string, unknown>;
   note?: string;
+  verdict?: SourceVerdict;
+  verdict_reason?: string;
+  rejection_reason?: string;
+  publisher?: string;
+  source_title?: string;
+  evidence_excerpt?: string;
+  confidence?: number;
+  organisation_number?: string;
+  company_name?: string;
+  identity_match?: boolean;
 }
 
 export interface RunMetrics {
