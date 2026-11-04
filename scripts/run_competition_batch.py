@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 
 from norway_company_agent.batch import compute_profile_status, profile_complete_for_modules, profiles_from_bulk, read_organisation_inputs, terminal_envelope, validate_envelopes  # noqa: E402
 from norway_company_agent.change_intelligence import analyze_profile_changes  # noqa: E402
-from norway_company_agent.discovery import build_company_search_queries, choose_search_candidate  # noqa: E402
+from norway_company_agent.discovery import build_company_search_queries, choose_search_candidate, compare_registry_and_search_candidates  # noqa: E402
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.explanations import explain_company_profile  # noqa: E402
 from norway_company_agent.http import fetch_json  # noqa: E402
@@ -176,12 +176,37 @@ def main() -> None:
             profile.setdefault("evidence", {}).update(records)
             website_metrics = {"requests": 0, "bytes": 0, "latencies_ms": []}
             if "website" in requested_modules:
+                reg_site_record = None
                 if profile.get("website"):
-                    # Registry website exists — use the existing direct-fetch path.
                     website_record, website_metrics = fetch_website(profile.get("website"), guard=guard)
-                    profile["evidence"]["website"] = apply_website_identity_gate(profile, website_record)["website"]
-                elif brave_api_key and not guard.is_reduced_mode():
-                    # No registry website — attempt discovery fallback if budget permits.
+                    gated = apply_website_identity_gate(profile, website_record)
+                    assessment = gated.get("assessment")
+                    website = gated["website"]
+                    if assessment and assessment.get("publishable") and website.get("status") == "available":
+                        profile["evidence"]["website"] = website
+                        profile["website"] = (website.get("value") or {}).get("final_url") or website.get("source_url") or profile.get("website")
+                        reg_site_record = website
+                    else:
+                        rej_status = (assessment.get("status") if assessment else None) or "identity_rejected"
+                        rej_reason = "; ".join(assessment.get("reasons", [])) if assessment else "Registry website failed identity verification"
+                        profile.setdefault("rejected_evidence", {})["website"] = {
+                            "url": profile.get("website"),
+                            "status": rej_status,
+                            "reason": rej_reason,
+                        }
+                        profile["evidence"]["website"] = evidence(
+                            "website", "not_found",
+                            "registry_linked_company_website",
+                            profile.get("website") or "https://data.brreg.no/enhetsregisteret/api/enheter",
+                            note=rej_reason,
+                            content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
+                        )
+                        profile["unverified_registry_website"] = profile.get("website")
+                        profile["website"] = None
+                        reg_site_record = profile["evidence"]["website"]
+
+                if (not profile.get("website")) and brave_api_key and not guard.is_reduced_mode():
+                    # No verified registry website — attempt discovery fallback if budget permits.
                     allow_discovery = False
                     with discovery_budget_lock:
                         if discovery_budget_state["count"] < discovery_budget_limit:
@@ -207,6 +232,11 @@ def main() -> None:
                             website_metrics["latencies_ms"].append(search_op["latency_ms"])
                         with discovery_stats_lock:
                             discovery_stats["candidates_found"] += len(search_results)
+
+                        # Compare registry website with independent search candidates
+                        comparison = compare_registry_and_search_candidates(profile, reg_site_record, search_results)
+                        profile["website_comparison"] = comparison
+
                         decision = choose_search_candidate(profile, search_results)
                         selected = decision.get("selected")
                         # One bounded retry with a different exact-entity query when
@@ -242,6 +272,11 @@ def main() -> None:
 
                         # Reuse the same public search response for recall signals.
                         enrichment = extract_search_enrichment(profile, search_results, retrieved_at=utc_now())
+                        if enrichment.get("rejected_news"):
+                            profile.setdefault("rejected_evidence", {})["news"] = enrichment["rejected_news"]
+                        if enrichment.get("rejected_hiring"):
+                            profile.setdefault("rejected_evidence", {})["hiring"] = enrichment["rejected_hiring"]
+
                         if enrichment["social_profiles"]:
                             profile["social_profiles"] = enrichment["social_profiles"]
                             profile["social_presence"] = enrichment["social_profiles"]
@@ -300,6 +335,7 @@ def main() -> None:
                                     note=rej_reason,
                                     content_sha256=hashlib.sha256(rej_reason.encode("utf-8")).hexdigest(),
                                 )
+                                profile["website"] = None
                                 with discovery_stats_lock:
                                     discovery_stats["candidates_rejected"] += 1
                                     discovery_stats["rejection_reasons"][rej_reason] = discovery_stats["rejection_reasons"].get(rej_reason, 0) + 1
@@ -322,7 +358,7 @@ def main() -> None:
                             note=note,
                             content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                         )
-                else:
+                elif not profile.get("website"):
                     note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
                     profile["evidence"]["website"] = evidence(
                         "website", "not_found",

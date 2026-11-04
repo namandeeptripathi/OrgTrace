@@ -156,3 +156,139 @@ def choose_search_candidate(profile: dict[str, Any], results: list[dict[str, Any
         "abstained": not accepted,
         "policy": "A search result is only a crawl candidate. Publication still requires fetched-page exact-entity verification.",
     }
+
+
+def compare_registry_and_search_candidates(
+    profile: dict[str, Any],
+    registry_website: dict[str, Any] | None,
+    search_candidates: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Compare a registry website candidate with independent search candidates.
+
+    Guarantees:
+    - Never attributes parent/brand or wrong company websites to a subsidiary.
+    - Corroborates when registry and independent search candidate agree.
+    - Resolves conflict in favor of verified company-specific candidate over parent candidate.
+    - Marks uncertain / ambiguous when sources conflict without decisive proof.
+    """
+    from .identity import assess_website_identity
+
+    reg_url = ""
+    reg_assessment: dict[str, Any] | None = None
+    if registry_website:
+        reg_val = registry_website.get("value") or {}
+        reg_url = str(reg_val.get("final_url") or registry_website.get("source_url") or profile.get("website") or "").strip()
+        reg_assessment = reg_val.get("identity_assessment")
+        if not reg_assessment and reg_url:
+            temp_p = {**profile, "evidence": {**profile.get("evidence", {}), "website": registry_website}}
+            reg_assessment = assess_website_identity(temp_p)
+
+    search_decision = choose_search_candidate(profile, search_candidates) if search_candidates else {"selected": None, "candidates": []}
+    selected_search = search_decision.get("selected")
+    search_url = str(selected_search.get("url") or "").strip() if selected_search else ""
+
+    reg_host = (urllib.parse.urlparse(reg_url).hostname or "").lower().removeprefix("www.")
+    search_host = (urllib.parse.urlparse(search_url).hostname or "").lower().removeprefix("www.")
+
+    reg_publishable = bool(reg_assessment and reg_assessment.get("publishable") and registry_website and registry_website.get("status") == "available")
+    search_publishable = bool(selected_search and selected_search.get("publishable_candidate"))
+
+    # Case 1: Both candidates exist and agree on domain
+    if reg_host and search_host and (reg_host == search_host or reg_host.endswith("." + search_host) or search_host.endswith("." + reg_host)):
+        if reg_publishable:
+            return {
+                "verdict": "corroborated",
+                "status": "available",
+                "publishable": True,
+                "selected_url": reg_url,
+                "confidence": 0.99,
+                "comparison_reason": f"Registry website and independent search candidate independently agree on domain '{reg_host}'",
+                "registry_assessment": reg_assessment,
+                "search_candidate": selected_search,
+                "quarantined_urls": [],
+            }
+        else:
+            return {
+                "verdict": "corroborated_but_unverified",
+                "status": "not_found",
+                "publishable": False,
+                "selected_url": None,
+                "confidence": 0.0,
+                "comparison_reason": f"Registry domain '{reg_host}' and search candidate agree but failed exact-entity identity verification ({reg_assessment.get('status') if reg_assessment else 'unverified'})",
+                "registry_assessment": reg_assessment,
+                "search_candidate": selected_search,
+                "quarantined_urls": [reg_url] if reg_url else [],
+            }
+
+    # Case 2: Registry is rejected / parent / wrong-company, but search candidate is company-specific
+    if (not reg_publishable) and search_publishable:
+        rej_desc = reg_assessment.get("status") if reg_assessment else "unverified"
+        rej_reasons = "; ".join(reg_assessment.get("reasons", [])) if reg_assessment else "lacks exact-entity proof"
+        return {
+            "verdict": "search_candidate_preferred",
+            "status": "pending_crawl",
+            "publishable": True,
+            "selected_url": search_url,
+            "confidence": 0.92,
+            "comparison_reason": f"Registry website '{reg_url}' rejected ({rej_desc}: {rej_reasons}); independent search candidate '{search_url}' preferred for company-specific attribution",
+            "registry_assessment": reg_assessment,
+            "search_candidate": selected_search,
+            "quarantined_urls": [reg_url] if reg_url else [],
+        }
+
+    # Case 3: Registry is confirmed exact match
+    if reg_publishable:
+        return {
+            "verdict": "registry_confirmed",
+            "status": "available",
+            "publishable": True,
+            "selected_url": reg_url,
+            "confidence": 0.98,
+            "comparison_reason": f"Registry website '{reg_url}' verified with exact company identity evidence",
+            "registry_assessment": reg_assessment,
+            "search_candidate": selected_search,
+            "quarantined_urls": [],
+        }
+
+    # Case 4: Registry rejected and no valid search candidate
+    if reg_url and not reg_publishable and not search_publishable:
+        rej_desc = reg_assessment.get("status") if reg_assessment else "unverified"
+        rej_reasons = "; ".join(reg_assessment.get("reasons", [])) if reg_assessment else "lacks exact-entity proof"
+        return {
+            "verdict": "registry_rejected_no_search_candidate",
+            "status": "not_found",
+            "publishable": False,
+            "selected_url": None,
+            "confidence": 0.0,
+            "comparison_reason": f"Registry website '{reg_url}' rejected ({rej_desc}: {rej_reasons}) and no publishable independent search candidate discovered",
+            "registry_assessment": reg_assessment,
+            "search_candidate": selected_search,
+            "quarantined_urls": [reg_url],
+        }
+
+    # Case 5: Conflicting candidates without conclusive proof
+    if reg_host and search_host and reg_host != search_host:
+        return {
+            "verdict": "unsure_conflict",
+            "status": "ambiguous",
+            "publishable": False,
+            "selected_url": None,
+            "confidence": 0.0,
+            "comparison_reason": f"Registry domain '{reg_host}' conflicts with search candidate domain '{search_host}' without conclusive exact-entity corroboration",
+            "registry_assessment": reg_assessment,
+            "search_candidate": selected_search,
+            "quarantined_urls": [reg_url, search_url],
+        }
+
+    # Case 6: Neither exists
+    return {
+        "verdict": "no_candidates",
+        "status": "not_found",
+        "publishable": False,
+        "selected_url": None,
+        "confidence": 0.0,
+        "comparison_reason": "No registry website and no search candidate found",
+        "registry_assessment": None,
+        "search_candidate": None,
+        "quarantined_urls": [],
+    }

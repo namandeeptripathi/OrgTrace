@@ -116,6 +116,29 @@ def extract_ats_links(soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]
         title_attr = str(anchor.get("title") or "")
         haystack = f"{anchor_text} {aria_label} {title_attr} {parsed.path}".lower()
         if any(term in haystack for term in CAREER_ANCHOR_TERMS):
+            # Reject ATS vendor homepages and generic portal roots (no company-specific tenant or vacancy)
+            clean_host = host.removeprefix("www.")
+            path = parsed.path.casefold().rstrip("/")
+            query = parsed.query.casefold()
+            if clean_host in {"teamtailor.com", "reachmee.com", "webcruiter.no", "recman.no", "bamboohr.com", "jobbnorge.no", "finn.no"}:
+                if clean_host == "finn.no":
+                    path_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)/\d+", path) or re.search(r"/jobb/bedrift/[a-z0-9_-]+/\d+", path))
+                    query_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)", path) and re.search(r"(?:id|finnkode)=\d+", query))
+                    if not (path_has_id or query_has_id):
+                        continue
+                elif clean_host == "jobbnorge.no":
+                    path_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling/\d+", path))
+                    query_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling", path) and re.search(r"(?:id|jobid)=\d+", query))
+                    if not (path_has_id or query_has_id):
+                        continue
+                else:
+                    if not re.search(r"/(?:companies|jobs|stilling|positions)/[a-z0-9_-]+", path):
+                        continue
+            else:
+                subdomain = clean_host.split(".")[0]
+                if subdomain in {"www", "app", "api", "login", "admin", "help", "support", "marketing", "blog"}:
+                    continue
+
             if url not in seen:
                 seen.add(url)
                 links.append({

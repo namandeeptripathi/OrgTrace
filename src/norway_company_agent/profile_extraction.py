@@ -1173,6 +1173,22 @@ def extract_careers(
             if not any(existing.get("url") == lk.get("url") for existing in ats_links):
                 ats_links.append(lk)
 
+    # Filter out ATS vendor homepages and portal roots
+    valid_ats_links = []
+    for lk in ats_links:
+        parsed_lk = urllib.parse.urlparse(str(lk.get("url") or ""))
+        lk_host = (parsed_lk.hostname or "").lower().removeprefix("www.")
+        lk_path = parsed_lk.path.casefold().rstrip("/")
+        if lk_host in {"teamtailor.com", "reachmee.com", "webcruiter.no", "recman.no", "bamboohr.com", "jobbnorge.no", "finn.no"}:
+            if lk_host == "finn.no" and not (re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)/\d+", lk_path) or re.search(r"/jobb/bedrift/[a-z0-9_-]+/\d+", lk_path)):
+                continue
+            elif lk_host == "jobbnorge.no" and not re.search(r"/(?:ledige-stillinger/)?stilling/\d+", lk_path):
+                continue
+            elif not re.search(r"/(?:companies|jobs|stilling|positions)/[a-z0-9_-]+", lk_path):
+                continue
+        valid_ats_links.append(lk)
+    ats_links = valid_ats_links
+
     w_retrieved = (profile.get("evidence") or {}).get("website", {}).get("retrieved_at")
 
     if not careers_page:
@@ -1301,12 +1317,36 @@ def extract_news(
     for page in pages:
         p_url = str(page.get("url") or "")
         parsed = urllib.parse.urlparse(p_url)
+        p_path = parsed.path.rstrip("/").casefold()
         if NEWS_PATH.search(parsed.path) or parsed.netloc.lower().startswith(("news.", "nyheter.", "presse.")):
             title = str(page.get("title") or "Nyhet").strip()
             snippet = str(page.get("main_text_excerpt") or "").strip()[:300]
-            # Try finding date in snippet or title (e.g. 2024-05-12, 12.05.2024)
+            # Genuine publication date check (no modified, future, or retrieval dates)
             date_match = re.search(r"\b(\d{4}[-/]\d{2}[-/]\d{2}|\d{2}\.\d{2}\.\d{4})\b", f"{title} {snippet}")
-            date_str = date_match.group(1) if date_match else None
+            date_str = None
+            if date_match:
+                raw_cand = date_match.group(1).replace("/", "-").replace(".", "-")
+                parts = raw_cand.split("-")
+                iso_cand = f"{parts[2]}-{parts[1]}-{parts[0]}" if len(parts[0]) == 2 else raw_cand
+                from datetime import date as dt_date, datetime as dt_datetime, timezone as dt_timezone
+                try:
+                    y, m, d = [int(x) for x in iso_cand.split("-")]
+                    cand_dt = dt_date(y, m, d)
+                    today = dt_datetime.now(dt_timezone.utc).date()
+                    ctx_lower = f"{title} {snippet}".casefold()
+                    is_modified = any(marker in ctx_lower for marker in ("sist oppdatert", "oppdatert:", "sist endret", "updated:", "modified:"))
+                    retrieval_date = (page.get("retrieved_at") or w_retrieved or "")[:10]
+                    if cand_dt <= today and cand_dt.year >= 2000 and not is_modified:
+                        if not (retrieval_date and iso_cand == retrieval_date and "publisert" not in ctx_lower):
+                            date_str = iso_cand
+                except (ValueError, TypeError):
+                    date_str = None
+
+            # Skip generic section hub pages if they lack a specific dated announcement
+            is_generic_path = p_path in {"", "/news", "/nyheter", "/aktuelt", "/presse", "/pressemeldinger", "/artikler", "/artikkel", "/media", "/press", "/blogg", "/blog", "/siste-nytt", "/nyhetsarkiv"}
+            is_generic_title = title.casefold() in {"", "nyhet", "nyheter", "news", "aktuelt", "presse", "press", "pressemeldinger", "siste nytt", "nyhetsarkiv", "artikler", "blogg", "media", "forside", "hjem", "home"}
+            if is_generic_path and is_generic_title and not date_str:
+                continue
 
             news_items.append({
                 "title": title,

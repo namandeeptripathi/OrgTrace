@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
 import re
 import urllib.parse
 from typing import Any
 
 from .discovery import BLOCKED_DISCOVERY_HOSTS
 from .identity import assess_social_identity
+from .identity_engine import canonicalize_org_number, is_valid_org_mod11
 from .website import normalize_social_url
 
 ATS_HOSTS = {
@@ -118,35 +120,82 @@ def _municipality_match(profile: dict[str, Any], result: dict[str, Any]) -> bool
     return municipality.issubset(evidence_tokens)
 
 
-def _parse_date(value: Any) -> str | None:
+def _parse_date(
+    value: Any,
+    *,
+    retrieved_at: str | None = None,
+    text_context: str | None = None,
+) -> str | None:
     raw = str(value or "").strip()
     if not raw:
         return None
+
+    # Reject if explicitly labeled as modified / updated / retrieval date in text context
+    if text_context:
+        ctx_lower = text_context.casefold()
+        for marker in ("sist oppdatert", "oppdatert:", "sist endret", "updated:", "last modified", "modified:", "hentet:"):
+            if marker in ctx_lower and raw.casefold() in ctx_lower:
+                idx = ctx_lower.find(marker)
+                if idx != -1 and ctx_lower.find(raw.casefold(), idx) != -1:
+                    return None
+
+    cand_str: str | None = None
     # ISO date prefix YYYY-MM-DD
     if re.match(r"^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$", raw):
-        return raw[:10]
+        cand_str = raw[:10]
+    else:
+        for pattern in DATE_PATTERNS:
+            match = pattern.search(raw)
+            if match:
+                candidate = match.group(1).replace("/", "-").replace(".", "-")
+                parts = candidate.split("-")
+                if len(parts) == 3:
+                    if len(parts[0]) == 2:
+                        cand_str = f"{parts[2]}-{parts[1]}-{parts[0]}"
+                    else:
+                        cand_str = candidate
+                    break
 
-    for pattern in DATE_PATTERNS:
-        match = pattern.search(raw)
-        if match:
-            candidate = match.group(1).replace("/", "-").replace(".", "-")
-            parts = candidate.split("-")
-            if len(parts) == 3:
-                if len(parts[0]) == 2:
-                    return f"{parts[2]}-{parts[1]}-{parts[0]}"
-                return candidate
+        if not cand_str:
+            # Textual month matching: "15. mai 2024" or "May 15, 2024"
+            match_txt = TEXT_DATE_PATTERN.search(raw)
+            if match_txt:
+                day_str = match_txt.group(1).zfill(2)
+                month_str = match_txt.group(2).lower()
+                year_str = match_txt.group(3)
+                month_num = MONTH_MAP.get(month_str)
+                if month_num:
+                    cand_str = f"{year_str}-{month_num}-{day_str}"
 
-    # Textual month matching: "15. mai 2024" or "May 15, 2024"
-    match_txt = TEXT_DATE_PATTERN.search(raw)
-    if match_txt:
-        day_str = match_txt.group(1).zfill(2)
-        month_str = match_txt.group(2).lower()
-        year_str = match_txt.group(3)
-        month_num = MONTH_MAP.get(month_str)
-        if month_num:
-            return f"{year_str}-{month_num}-{day_str}"
+    if not cand_str:
+        return None
 
-    return None
+    # Validate date validity, range, and future rejection
+    try:
+        parts = [int(p) for p in cand_str.split("-")]
+        if len(parts) != 3:
+            return None
+        cand_date = date(parts[0], parts[1], parts[2])
+    except (ValueError, TypeError):
+        return None
+
+    today = datetime.now(timezone.utc).date()
+    if cand_date > today:
+        # Future date rejected!
+        return None
+    if cand_date.year < 2000:
+        return None
+
+    # Reject retrieval timestamp date unless article text contains explicit publication marker
+    if retrieved_at and cand_str == retrieved_at[:10]:
+        has_pub_marker = False
+        if text_context:
+            ctx_lower = text_context.casefold()
+            has_pub_marker = any(m in ctx_lower for m in ("publisert", "published", "pressemelding", "press release"))
+        if not has_pub_marker:
+            return None
+
+    return cand_str
 
 
 def _is_social(result: dict[str, Any]) -> bool:
@@ -157,14 +206,40 @@ def _is_social(result: dict[str, Any]) -> bool:
 def _is_ats(result: dict[str, Any]) -> tuple[str, bool]:
     parsed = urllib.parse.urlparse(str(result.get("url") or ""))
     host = (parsed.hostname or "").casefold().removeprefix("www.")
-    path = parsed.path.casefold()
+    path = parsed.path.casefold().rstrip("/")
+
+    # 1. ATS vendor domains: reject vendor homepages and generic roots
     for domain, platform in ATS_HOSTS.items():
-        if host == domain or host.endswith("." + domain):
-            if domain == "finn.no" and not any(term in path for term in ("/jobb", "/stilling", "/stillinger")):
-                continue
+        if host == domain or host == "www." + domain:
+            query = parsed.query.casefold()
+            if domain == "finn.no":
+                path_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)/\d+", path) or re.search(r"/jobb/bedrift/[a-z0-9_-]+/\d+", path))
+                query_has_id = bool(re.search(r"/jobb/(?:stilling|heltid|deltid|leder|sommerjobb)", path) and re.search(r"(?:id|finnkode)=\d+", query))
+                if path_has_id or query_has_id:
+                    return platform, True
+                return "", False
+            elif domain == "jobbnorge.no":
+                path_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling/\d+", path))
+                query_has_id = bool(re.search(r"/(?:ledige-stillinger/)?stilling", path) and re.search(r"(?:id|jobid)=\d+", query))
+                if path_has_id or query_has_id:
+                    return platform, True
+                return "", False
+            else:
+                if path in {"", "/", "/en", "/nb", "/no", "/about", "/about-us", "/pricing", "/login", "/contact", "/demo", "/privacy", "/terms", "/jobs", "/careers", "/stillinger"}:
+                    return "", False
+                if re.search(r"/(?:companies|jobs|stilling|positions)/[a-z0-9_-]+", path):
+                    return platform, True
+                return "", False
+        elif host.endswith("." + domain):
+            subdomain = host.removesuffix("." + domain)
+            if subdomain in {"www", "app", "api", "login", "admin", "help", "support", "marketing", "blog", "status", "mail", "cdn", "demo"}:
+                return "", False
             return platform, True
-    if any(term in path for term in ("/career", "/careers", "/jobs", "/job/", "/stilling", "/stillinger", "/jobb")):
+
+    # 2. Company website internal career paths
+    if any(term in path for term in ("/career", "/careers", "/jobs", "/job/", "/stilling", "/stillinger", "/jobb", "/karriere")):
         return "", True
+
     return "", False
 
 
@@ -172,13 +247,23 @@ def _is_news_candidate(result: dict[str, Any]) -> bool:
     url = str(result.get("url") or "").strip()
     parsed = urllib.parse.urlparse(url)
     host = (parsed.hostname or "").casefold().removeprefix("www.")
-    path = parsed.path.casefold()
+    path = parsed.path.casefold().rstrip("/")
 
     if any(host == b or host.endswith("." + b) for b in BLOCKED_DISCOVERY_HOSTS):
         return False
     if _is_social(result):
         return False
     if _is_ats(result)[1]:
+        return False
+
+    # 1. Real article path check: reject generic section roots / index hubs
+    if path in {"", "/", "/nyheter", "/news", "/pressemelding", "/pressemeldinger", "/press", "/aktuelt", "/artikler", "/artikkel", "/media", "/presse", "/siste-nytt", "/nyhetsarkiv", "/blog", "/blogg", "/feed", "/rss"}:
+        return False
+
+    # 2. Real article title check: reject generic section titles
+    title = str(result.get("title") or "").strip().casefold()
+    generic_titles = {"nyheter", "news", "aktuelt", "presse", "press", "pressemeldinger", "siste nytt", "nyhetsarkiv", "artikler", "blogg", "media", "forside", "hjem", "home"}
+    if title in generic_titles or title.endswith(" - nyheter") or title.startswith("nyheter - "):
         return False
 
     result_kind = str(result.get("result_kind") or "").casefold()
@@ -202,9 +287,14 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
     social: list[dict[str, Any]] = []
     news: list[dict[str, Any]] = []
     hiring_candidates: list[dict[str, Any]] = []
+    rejected_news: list[dict[str, Any]] = []
+    rejected_hiring: list[dict[str, Any]] = []
     seen_social: set[str] = set()
     seen_news: set[str] = set()
     seen_hiring: set[str] = set()
+
+    org = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
+    parent_org = canonicalize_org_number(profile.get("overordnetEnhet") or profile.get("parent_organisation"))
 
     for result in results:
         url = str(result.get("url") or "").strip()
@@ -212,11 +302,13 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
             continue
         title = str(result.get("title") or "").strip()
         snippet = str(result.get("snippet") or "").strip()
-        if not _name_match(profile, result):
-            continue
+        haystack = f"{title} {snippet}"
+        found_orgs = [o for o in re.findall(r"\b\d{9}\b", haystack) if is_valid_org_mod11(o)]
 
         # 1. Social profiles with identity gating
         if _is_social(result):
+            if not _name_match(profile, result):
+                continue
             normalized = normalize_social_url(url)
             if normalized and normalized["url"] not in seen_social:
                 identity = assess_social_identity(profile, normalized)
@@ -228,38 +320,99 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                         "source_url": url,
                         "source": "public_search",
                         "retrieved_at": retrieved_at,
-                        "organisation_number": str(profile.get("organisation_number") or ""),
+                        "organisation_number": org,
                         "company_name": str(profile.get("name") or ""),
                         "identity_match": True,
                         "evidence_excerpt": title or snippet[:300],
                         "confidence": confidence,
                     })
 
-        # 2. Dated news only (undated never becomes dated news)
+        # 2. Dated news only (real article, exact company attribution, genuine publication date)
         if _is_news_candidate(result):
-            published_at = _parse_date(result.get("page_age") or result.get("published_at") or title or snippet)
-            if published_at and url not in seen_news:
-                seen_news.add(url)
-                news.append({
-                    "title": title or "Public company news",
+            if parent_org and parent_org in found_orgs and org not in found_orgs:
+                rejected_news.append({
                     "url": url,
-                    "date": published_at,
-                    "published_at": published_at,
-                    "snippet": snippet[:500],
-                    "source": str(result.get("source") or "public_search"),
-                    "source_url": url,
-                    "retrieved_at": retrieved_at,
-                    "organisation_number": str(profile.get("organisation_number") or ""),
-                    "company_name": str(profile.get("name") or ""),
-                    "identity_match": True,
-                    "evidence_excerpt": snippet[:500],
-                    "confidence": 0.9 if _municipality_match(profile, result) else 0.82,
+                    "title": title,
+                    "reason": f"News candidate cites parent organisation number {parent_org}, not subsidiary {org}",
+                })
+                continue
+
+            conflicting_orgs = [o for o in found_orgs if o != org and o != parent_org]
+            if conflicting_orgs:
+                rejected_news.append({
+                    "url": url,
+                    "title": title,
+                    "reason": f"News candidate cites conflicting organisation number {conflicting_orgs[0]}",
+                })
+                continue
+
+            if not _name_match(profile, result):
+                rejected_news.append({
+                    "url": url,
+                    "title": title,
+                    "reason": "News candidate lacks exact legal name match for target company",
+                })
+                continue
+
+            published_at = _parse_date(
+                result.get("published_at") or result.get("page_age") or title or snippet,
+                retrieved_at=retrieved_at,
+                text_context=haystack,
+            )
+            if published_at:
+                if url not in seen_news:
+                    seen_news.add(url)
+                    news.append({
+                        "title": title or "Public company news",
+                        "url": url,
+                        "date": published_at,
+                        "published_at": published_at,
+                        "snippet": snippet[:500],
+                        "source": str(result.get("source") or "public_search"),
+                        "source_url": url,
+                        "retrieved_at": retrieved_at,
+                        "organisation_number": org,
+                        "company_name": str(profile.get("name") or ""),
+                        "identity_match": True,
+                        "evidence_excerpt": snippet[:500],
+                        "confidence": 0.9 if _municipality_match(profile, result) else 0.82,
+                    })
+            else:
+                rejected_news.append({
+                    "url": url,
+                    "title": title,
+                    "reason": "News article lacks verifiable genuine publication date (undated or invalid date)",
                 })
 
-        # 3. Hiring & ATS portals
+        # 3. Hiring & ATS portals (exact employer, company-specific listing, no vendor homepage or parent vacancies)
         platform, ats = _is_ats(result)
         path_text = f"{title} {snippet} {url}".casefold()
         if ats or any(term in path_text for term in CAREER_TERMS):
+            if parent_org and parent_org in found_orgs and org not in found_orgs:
+                rejected_hiring.append({
+                    "url": url,
+                    "title": title,
+                    "reason": f"Hiring listing is for parent entity {parent_org}, not target subsidiary {org}",
+                })
+                continue
+
+            conflicting_orgs = [o for o in found_orgs if o != org and o != parent_org]
+            if conflicting_orgs:
+                rejected_hiring.append({
+                    "url": url,
+                    "title": title,
+                    "reason": f"Hiring listing cites conflicting organisation number {conflicting_orgs[0]}",
+                })
+                continue
+
+            if not _name_match(profile, result):
+                rejected_hiring.append({
+                    "url": url,
+                    "title": title,
+                    "reason": "Hiring listing does not match target company exact employer",
+                })
+                continue
+
             if url not in seen_hiring:
                 seen_hiring.add(url)
                 active = any(term in path_text for term in ACTIVE_HIRING_TERMS)
@@ -271,7 +424,7 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                     "source": "public_search",
                     "source_url": url,
                     "retrieved_at": retrieved_at,
-                    "organisation_number": str(profile.get("organisation_number") or ""),
+                    "organisation_number": org,
                     "company_name": str(profile.get("name") or ""),
                     "identity_match": True,
                     "evidence_excerpt": (snippet or title)[:500],
@@ -282,4 +435,6 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
         "social_profiles": social[:10],
         "news": news[:10],
         "hiring": hiring_candidates[:10],
+        "rejected_news": rejected_news,
+        "rejected_hiring": rejected_hiring,
     }

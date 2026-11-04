@@ -639,6 +639,8 @@ class UnifiedCompanyProfile:
     facts: dict[CoverageCategory, CoverageFact]
     conflicts: list[ConflictRecord] = field(default_factory=list)
     operations: dict[str, Any] = field(default_factory=dict)
+    rejected_facts: list[dict[str, Any]] = field(default_factory=list)
+    unsure_facts: list[dict[str, Any]] = field(default_factory=list)
     schema_version: str = "2.0.0"
     created_at: str = field(default_factory=utc_now)
 
@@ -653,6 +655,8 @@ class UnifiedCompanyProfile:
             "created_at": self.created_at,
             "facts": {cat.value: fact.to_dict() for cat, fact in self.facts.items()},
             "conflicts": [c.to_dict() for c in self.conflicts],
+            "rejected_facts": self.rejected_facts,
+            "unsure_facts": self.unsure_facts,
             "operations": self.operations,
         }
 
@@ -680,14 +684,15 @@ class UnifiedCompanyProfile:
             ev_id = f"ev-{i+1}"
             raw_status = fact.status.value if hasattr(fact.status, "value") else str(fact.status)
             contract_avail = availability_map.get(raw_status, "not_available")
+            is_avail = (contract_avail == "available")
             claims.append({
                 "field": cat.value,
-                "value": fact.normalized_value if fact.value is not None else None,
+                "value": (fact.normalized_value if fact.value is not None else None) if is_avail else None,
                 "availability": contract_avail,
-                "confidence": round(fact.confidence, 2),
-                "evidence_ids": [ev_id] if fact.evidence_span or fact.source_url else [],
+                "confidence": round(fact.confidence, 2) if is_avail else (0.5 if contract_avail == "ambiguous" else 0.0),
+                "evidence_ids": [ev_id] if (is_avail and (fact.evidence_span or fact.source_url)) else [],
             })
-            if fact.evidence_span or fact.source_url:
+            if is_avail and (fact.evidence_span or fact.source_url):
                 evidence_list.append({
                     "id": ev_id,
                     "source_url": fact.source_url or "https://data.brreg.no/enhetsregisteret/api/enheter",
@@ -714,6 +719,8 @@ class UnifiedCompanyProfile:
                 "runtime_ms": self.operations.get("runtime_ms", 0),
                 "third_party_cost_usd": self.operations.get("cost", 0.0),
             },
+            "rejected_facts": self.rejected_facts,
+            "unsure_facts": self.unsure_facts,
         }
 
 
@@ -735,6 +742,8 @@ def build_unified_company_profile(
 
     facts: dict[CoverageCategory, CoverageFact] = {}
     conflicts: list[ConflictRecord] = []
+    rejected_facts: list[dict[str, Any]] = []
+    unsure_facts: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------------
     # 1. LEGAL NAME
@@ -991,23 +1000,12 @@ def build_unified_company_profile(
     # ------------------------------------------------------------------------
     website_rec = evidence_dict.get("website") or {}
     web_status = website_rec.get("status")
-    if web_status in ("source_error", "blocked", "failed", "offline"):
-        facts[CoverageCategory.WEBSITE] = CoverageFact(
-            category=CoverageCategory.WEBSITE,
-            field_name="website",
-            value=None,
-            normalized_value=None,
-            status=CoverageFieldStatus.UNAVAILABLE,
-            source_url=website_rec.get("source_url"),
-            source_type="website_discovery",
-            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=None,
-            confidence=0.0,
-            note=f"Website source inaccessible ({website_rec.get('error') or web_status})",
-        )
-        norm_website = None
-    else:
-        raw_website = (website_rec.get("value") or {}).get("final_url") or profile.get("website") or (website_rec.get("source_url") if web_status == "available" else None)
+    web_val = website_rec.get("value") or {}
+    ident_assessment = web_val.get("identity_assessment") or {}
+    is_publishable = bool(ident_assessment.get("publishable", True) and not website_rec.get("identity_rejected"))
+
+    if web_status == "available" and is_publishable:
+        raw_website = web_val.get("final_url") or website_rec.get("source_url") or profile.get("website")
         norm_website = normalize_url(raw_website)
         if norm_website:
             facts[CoverageCategory.WEBSITE] = CoverageFact(
@@ -1036,6 +1034,78 @@ def build_unified_company_profile(
                 confidence=0.0,
                 note="No verified first-party website found",
             )
+            norm_website = None
+    elif "website" not in evidence_dict and profile.get("website"):
+        raw_website = profile.get("website")
+        norm_website = normalize_url(raw_website)
+        if norm_website:
+            facts[CoverageCategory.WEBSITE] = CoverageFact(
+                category=CoverageCategory.WEBSITE,
+                field_name="website",
+                value=raw_website,
+                normalized_value=norm_website,
+                status=CoverageFieldStatus.AVAILABLE,
+                source_url=norm_website,
+                source_type="direct_profile",
+                source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
+                evidence_span=f"Direct profile website: {norm_website}",
+                confidence=0.95,
+            )
+        else:
+            facts[CoverageCategory.WEBSITE] = CoverageFact(
+                category=CoverageCategory.WEBSITE,
+                field_name="website",
+                value=None,
+                normalized_value=None,
+                status=CoverageFieldStatus.NOT_FOUND,
+                source_url=None,
+                source_type="direct_profile",
+                source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
+                evidence_span=None,
+                confidence=0.0,
+                note="No verified first-party website found",
+            )
+            norm_website = None
+    elif web_status in ("source_error", "blocked", "failed", "offline"):
+        facts[CoverageCategory.WEBSITE] = CoverageFact(
+            category=CoverageCategory.WEBSITE,
+            field_name="website",
+            value=None,
+            normalized_value=None,
+            status=CoverageFieldStatus.UNAVAILABLE,
+            source_url=website_rec.get("source_url"),
+            source_type="website_discovery",
+            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
+            evidence_span=None,
+            confidence=0.0,
+            note=f"Website source inaccessible ({website_rec.get('error') or web_status})",
+        )
+        norm_website = None
+    else:
+        rej_note = website_rec.get("note") or (f"Website identity gate rejected ({ident_assessment.get('status')})" if ident_assessment else "No verified first-party website found")
+        facts[CoverageCategory.WEBSITE] = CoverageFact(
+            category=CoverageCategory.WEBSITE,
+            field_name="website",
+            value=None,
+            normalized_value=None,
+            status=CoverageFieldStatus.NOT_FOUND,
+            source_url=website_rec.get("source_url"),
+            source_type="website_discovery",
+            source_priority=SourcePriority.FIRST_PARTY_WEBSITE,
+            evidence_span=None,
+            confidence=0.0,
+            note=rej_note,
+        )
+        norm_website = None
+        if website_rec.get("source_url") or ident_assessment:
+            conflicts.append(ConflictRecord(
+                category=CoverageCategory.WEBSITE.value,
+                chosen_value="not_found",
+                chosen_source="identity_gate",
+                conflicting_value=website_rec.get("source_url") or profile.get("website"),
+                conflicting_source=website_rec.get("source_type") or "registry_website",
+                resolution_rationale=rej_note,
+            ))
 
     # ------------------------------------------------------------------------
     # 10. DESCRIPTION
@@ -1469,24 +1539,26 @@ def build_unified_company_profile(
         news_source = norm_website
         news_type = "company_website"
         news_conf = 0.0
-    if news_value:
+    confirmed_news = [n for n in news_value if isinstance(n, dict) and n.get("title") and n.get("date")] if news_value else []
+    if confirmed_news:
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
             category=CoverageCategory.NEWS_EVENTS, field_name="news_events",
-            value=news_value,
-            normalized_value=[n.get("title") for n in news_value if isinstance(n, dict)],
+            value=confirmed_news,
+            normalized_value=[n.get("title") for n in confirmed_news if isinstance(n, dict)],
             status=CoverageFieldStatus.AVAILABLE, source_url=news_source,
             source_type=news_type,
             source_priority=SourcePriority.FIRST_PARTY_WEBSITE if news_type != "public_search" else SourcePriority.REPUTABLE_SECONDARY,
-            evidence_span=f"Extracted {len(news_value)} dated public news item(s)",
+            evidence_span=f"Extracted {len(confirmed_news)} dated public news item(s)",
             confidence=news_conf,
         )
     else:
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
-            category=CoverageCategory.NEWS_EVENTS, field_name="news_events", value=[],
-            normalized_value=[],
+            category=CoverageCategory.NEWS_EVENTS, field_name="news_events", value=None,
+            normalized_value=None,
             status=CoverageFieldStatus.NOT_FOUND if norm_website else CoverageFieldStatus.UNAVAILABLE,
             source_url=news_source, source_type=news_type,
             source_priority=SourcePriority.FIRST_PARTY_WEBSITE, evidence_span=None, confidence=0.0,
+            note="No verified dated news articles found",
         )
 
     # ------------------------------------------------------------------------
@@ -1673,12 +1745,31 @@ def build_unified_company_profile(
     # Verify all 29 categories are populated
     assert len(facts) == 29, f"Profile must contain all 29 categories, got {len(facts)}"
 
+    # Collect rejected and unsure evidence from profile
+    if isinstance(profile.get("rejected_evidence"), dict):
+        for fld, items in profile["rejected_evidence"].items():
+            if isinstance(items, list):
+                for itm in items:
+                    rejected_facts.append({"field": fld, **(itm if isinstance(itm, dict) else {"details": itm})})
+            elif isinstance(items, dict):
+                rejected_facts.append({"field": fld, **items})
+
+    if isinstance(profile.get("unsure_evidence"), dict):
+        for fld, items in profile["unsure_evidence"].items():
+            if isinstance(items, list):
+                for itm in items:
+                    unsure_facts.append({"field": fld, **(itm if isinstance(itm, dict) else {"details": itm})})
+            elif isinstance(items, dict):
+                unsure_facts.append({"field": fld, **items})
+
     return UnifiedCompanyProfile(
         organisation_number=org_number,
         company_name=company_name,
         facts=facts,
         conflicts=conflicts,
         operations=operations_metrics or {},
+        rejected_facts=rejected_facts,
+        unsure_facts=unsure_facts,
     )
 
 
