@@ -233,6 +233,109 @@ class ATSAndJobValidationRegressionTests(unittest.TestCase):
         self.assertTrue(len(enrichment["rejected_hiring"]) > 0)
         self.assertTrue(any("parent" in r["reason"].lower() for r in enrichment["rejected_hiring"]))
 
+    def test_verified_registry_website_genuine_ats_job_reaches_envelope_while_generic_and_parent_rejected(self):
+        """Verified registry website path: Genuine ATS job listing reaches contract envelope; generic ATS portals and parent vacancies are rejected."""
+        from norway_company_agent.batch import terminal_envelope
+
+        profile = {
+            "organisation_number": "999888777",
+            "name": "Nordic Solutions AS",
+            "overordnetEnhet": "912345688",
+            "website": "https://nordicsolutions.no",
+            "evidence": {
+                "registry": evidence(
+                    "registry", "available", "official_registry",
+                    "https://data.brreg.no/enhetsregisteret/api/enheter/999888777",
+                    value={"organisation_number": "999888777", "name": "Nordic Solutions AS"},
+                ),
+                "website": evidence(
+                    "website", "available", "registry_linked_company_website",
+                    "https://nordicsolutions.no",
+                    value={
+                        "final_url": "https://nordicsolutions.no",
+                        "title": "Nordic Solutions AS",
+                        "main_text": "Nordic Solutions AS, org.nr 999 888 777.",
+                    },
+                ),
+            },
+        }
+
+        search_results = [
+            # 1. Genuine individual ATS job listing for target employer
+            {
+                "url": "https://nordicsolutions.teamtailor.com/jobs/42",
+                "title": "Senior Cloud Engineer hos Nordic Solutions AS",
+                "snippet": "Nordic Solutions AS søker Senior Cloud Engineer i Oslo. Arbeidsgiver: Nordic Solutions AS.",
+            },
+            # 2. Generic vendor portal / ATS homepage (must be rejected)
+            {
+                "url": "https://teamtailor.com",
+                "title": "Teamtailor Recruitment Software",
+                "snippet": "All-in-one recruitment software for smart businesses.",
+            },
+            # 3. Parent company vacancy (must be rejected)
+            {
+                "url": "https://parentcorp.teamtailor.com/jobs/99",
+                "title": "Konsernsjef hos Parent Corp ASA",
+                "snippet": "Parent Corp ASA (org.nr 912345688) søker ny konsernsjef.",
+            },
+        ]
+
+        enrichment = extract_search_enrichment(profile, search_results, retrieved_at="2026-11-04T00:00:00Z")
+
+        # Validation: only the genuine job listing for the exact employer passes
+        self.assertEqual(len(enrichment["hiring"]), 1)
+        self.assertEqual(enrichment["hiring"][0]["url"], "https://nordicsolutions.teamtailor.com/jobs/42")
+        self.assertEqual(enrichment["hiring"][0]["title"], "Senior Cloud Engineer hos Nordic Solutions AS")
+
+        # Vendor homepage and parent job are rejected with reasons
+        self.assertTrue(len(enrichment["rejected_hiring"]) >= 1)
+        self.assertTrue(any("parent" in r["reason"].lower() for r in enrichment["rejected_hiring"]))
+
+        # Attach enrichment to profile as done in batch runner
+        profile["hiring_search"] = enrichment["hiring"]
+        profile["evidence"]["hiring_search"] = evidence(
+            "careers", "available", "public_search",
+            "https://api.search.brave.com/res/v1/web/search",
+            value=enrichment["hiring"],
+            confidence=0.9,
+        )
+        profile["rejected_evidence"] = {"hiring": enrichment["rejected_hiring"]}
+
+        envelope = terminal_envelope(
+            profile,
+            run_id="run-test-hiring",
+            modules=["registry", "website"],
+            started_at="2026-11-04T00:00:00Z",
+            completed_at="2026-11-04T00:00:01Z",
+        )
+
+        # 1. Genuine individual ATS job advertisement reaches the final envelope claims & evidence
+        soc_claim = next(c for c in envelope["claims"] if c["field"] == "social_presence")
+        self.assertEqual(soc_claim["availability"], "available")
+        self.assertIn("https://nordicsolutions.teamtailor.com/jobs/42", soc_claim["value"])
+
+        # Evidence records the ATS job listing
+        matching_evidence = [e for e in envelope["evidence"] if "jobs/42" in e.get("source_url", "")]
+        self.assertTrue(len(matching_evidence) > 0)
+        self.assertIn("Senior Cloud Engineer", matching_evidence[0]["claim_span"])
+
+        # Profile in envelope carries hiring search
+        self.assertIn("hiring_search", envelope["profile"])
+        self.assertEqual(envelope["profile"]["hiring_search"][0]["url"], "https://nordicsolutions.teamtailor.com/jobs/42")
+
+        # 2. Generic career pages and parent-company jobs remain rejected in rejected_facts
+        self.assertTrue(len(envelope["rejected_facts"]) > 0)
+        self.assertTrue(any("parent" in r.get("reason", "").lower() for r in envelope["rejected_facts"]))
+
+        # Rejected parent and vendor URLs must NOT leak into published claims or evidence
+        published_urls = [c.get("value") for c in envelope["claims"] if c.get("value")]
+        evidence_urls = [e.get("source_url") for e in envelope["evidence"]]
+        self.assertNotIn("https://parentcorp.teamtailor.com/jobs/99", str(published_urls))
+        self.assertNotIn("https://parentcorp.teamtailor.com/jobs/99", str(evidence_urls))
+        self.assertNotIn("https://teamtailor.com", str(published_urls))
+        self.assertNotIn("https://teamtailor.com", str(evidence_urls))
+
 
 class NewsValidationRegressionTests(unittest.TestCase):
     """Priority 4: News validation (real article, genuine publication date vs modified/future/retrieval)."""
@@ -475,6 +578,12 @@ class DualPathEnrichmentRegressionTests(unittest.TestCase):
         self.assertEqual(web_claim["value"], "https://nordictech.no")
         self.assertEqual(news_claim["availability"], "available")
         self.assertIn("Nordic Tech AS vinner stor offentlig kontrakt", news_claim["value"])
+
+        # Hiring search is ingested into social_presence and evidence
+        soc_claim = next(c for c in envelope["claims"] if c["field"] == "social_presence")
+        self.assertEqual(soc_claim["availability"], "available")
+        self.assertIn("https://nordictech.teamtailor.com/jobs/101", soc_claim["value"])
+        self.assertTrue(any("jobs/101" in ev["source_url"] for ev in envelope["evidence"]))
 
     def test_path2_conflicting_registry_website_and_search_candidate_not_published(self):
         """Path 2: Registry domain and search candidate domain in conflict -> marked unsure, not published."""

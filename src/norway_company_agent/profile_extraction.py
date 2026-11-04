@@ -1147,7 +1147,37 @@ def extract_careers(
     homepage_url: str | None,
 ) -> ExtractedField[dict[str, Any]]:
     """Detect careers page and active openings without assuming hiring from presence alone."""
+    hiring_search = profile.get("hiring_search") or (
+        (profile.get("evidence", {}).get("hiring_search") or {}).get("value")
+        if isinstance(profile.get("evidence", {}).get("hiring_search"), dict)
+        else None
+    ) or []
+
     if not website_value:
+        if hiring_search and isinstance(hiring_search, list):
+            first = hiring_search[0]
+            ats_url = first.get("url")
+            active = any(x.get("hiring_active") is True for x in hiring_search)
+            openings = [x.get("title") for x in hiring_search if isinstance(x, dict) and x.get("title")]
+            return ExtractedField(
+                field_name="careers",
+                value={
+                    "has_careers_page": True,
+                    "careers_url": ats_url,
+                    "ats_careers_url": ats_url,
+                    "ats_platform": first.get("platform"),
+                    "hiring_active": True if active else None,
+                    "openings": openings[:10],
+                    "search_discovered_hiring": hiring_search,
+                    "source_url": first.get("source_url") or ats_url,
+                    "retrieved_at": first.get("retrieved_at"),
+                },
+                status=FieldStatus.FOUND,
+                source_url=first.get("source_url") or ats_url,
+                source_type="public_search_ats",
+                evidence_span=f"ATS job listing at {ats_url} ({first.get('platform')})",
+                confidence=first.get("confidence") or 0.9,
+            )
         return ExtractedField(
             field_name="careers",
             value=None,
@@ -1217,6 +1247,32 @@ def extract_careers(
                 confidence=0.9,
             )
 
+        # Check if search-discovered hiring candidates are present
+        if hiring_search and isinstance(hiring_search, list):
+            first = hiring_search[0]
+            ats_url = first.get("url")
+            active = any(x.get("hiring_active") is True for x in hiring_search)
+            openings = [x.get("title") for x in hiring_search if isinstance(x, dict) and x.get("title")]
+            return ExtractedField(
+                field_name="careers",
+                value={
+                    "has_careers_page": True,
+                    "careers_url": ats_url,
+                    "ats_careers_url": ats_url,
+                    "ats_platform": first.get("platform"),
+                    "hiring_active": True if active else None,
+                    "openings": openings[:10],
+                    "search_discovered_hiring": hiring_search,
+                    "source_url": first.get("source_url") or ats_url,
+                    "retrieved_at": first.get("retrieved_at"),
+                },
+                status=FieldStatus.FOUND,
+                source_url=first.get("source_url") or ats_url,
+                source_type="public_search_ats",
+                evidence_span=f"ATS job listing at {ats_url} ({first.get('platform')})",
+                confidence=first.get("confidence") or 0.9,
+            )
+
         # Check priority links or page text for career references
         main_text = " ".join([str(website_value.get("main_text_excerpt") or ""), *[str(p.get("main_text_excerpt") or "") for p in pages]])
         if re.search(r"\b(?:ledige\s+stillinger|karriere|work\s+with\s+us|jobb\s+hos\s+oss|jobbe\s+hos\s+oss|bli\s+en\s+av\s+oss|arbeide\s+hos\s+oss)\b", main_text, re.IGNORECASE):
@@ -1283,6 +1339,13 @@ def extract_careers(
     if ats_links:
         careers_data["ats_careers_url"] = ats_links[0]["url"]
         careers_data["ats_platform"] = ats_links[0].get("platform")
+    if hiring_search and isinstance(hiring_search, list):
+        careers_data["search_discovered_hiring"] = hiring_search
+        if any(x.get("hiring_active") is True for x in hiring_search):
+            careers_data["hiring_active"] = True
+        if not careers_data.get("ats_careers_url") and hiring_search[0].get("url"):
+            careers_data["ats_careers_url"] = hiring_search[0]["url"]
+            careers_data["ats_platform"] = hiring_search[0].get("platform")
 
     return ExtractedField(
         field_name="careers",

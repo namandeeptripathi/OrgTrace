@@ -31,6 +31,7 @@ from .profile_extraction import (
     ExtractedCompanyProfile,
     ExtractedField,
     FieldStatus,
+    extract_company_profile,
 )
 
 
@@ -740,6 +741,9 @@ def build_unified_company_profile(
     company_name = str(profile.get("name") or "").strip()
     evidence_dict = profile.get("evidence") or {}
 
+    if extracted_profile is None:
+        extracted_profile = extract_company_profile(profile)
+
     facts: dict[CoverageCategory, CoverageFact] = {}
     conflicts: list[ConflictRecord] = []
     rejected_facts: list[dict[str, Any]] = []
@@ -1260,7 +1264,14 @@ def build_unified_company_profile(
     # 13. EMPLOYEES
     # ------------------------------------------------------------------------
     emp_field = extracted_profile.employees if extracted_profile else None
+    hiring_rec = evidence_dict.get("hiring_search") or {}
+    hiring_candidates = hiring_rec.get("value") or profile.get("hiring_search") or []
+    hiring_titles = [h.get("title") for h in hiring_candidates if isinstance(h, dict) and h.get("title")]
+
     if emp_field and emp_field.status == FieldStatus.FOUND and emp_field.value is not None:
+        span = emp_field.evidence_span or f"Ansatte: {emp_field.value}"
+        if hiring_titles:
+            span += f" | Aktive stillinger: {len(hiring_titles)} ({'; '.join(hiring_titles[:2])})"
         facts[CoverageCategory.EMPLOYEES] = CoverageFact(
             category=CoverageCategory.EMPLOYEES,
             field_name="employees",
@@ -1270,11 +1281,14 @@ def build_unified_company_profile(
             source_url=emp_field.source_url,
             source_type=emp_field.source_type,
             source_priority=SourcePriority.OFFICIAL_REGISTRY if "registry" in emp_field.source_type else SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=emp_field.evidence_span,
+            evidence_span=span,
             confidence=emp_field.confidence,
         )
     elif profile.get("employees") is not None:
         c_emp = int(profile["employees"])
+        span = f"Ansatte i Enhetsregisteret: {c_emp}"
+        if hiring_titles:
+            span += f" | Aktive stillinger: {len(hiring_titles)} ({'; '.join(hiring_titles[:2])})"
         facts[CoverageCategory.EMPLOYEES] = CoverageFact(
             category=CoverageCategory.EMPLOYEES,
             field_name="employees",
@@ -1284,7 +1298,7 @@ def build_unified_company_profile(
             source_url="https://data.brreg.no/enhetsregisteret/api/enheter",
             source_type="official_registry",
             source_priority=SourcePriority.OFFICIAL_REGISTRY,
-            evidence_span=f"Ansatte i Enhetsregisteret: {c_emp}",
+            evidence_span=span,
             confidence=1.0,
         )
     else:
@@ -1570,22 +1584,53 @@ def build_unified_company_profile(
     # 24. SOCIAL / COMPANY PRESENCE
     # ------------------------------------------------------------------------
     social_rec = evidence_dict.get("social_presence_search") or {}
+    hiring_rec = evidence_dict.get("hiring_search") or {}
+    hiring_candidates = hiring_rec.get("value") or profile.get("hiring_search") or []
+    careers_field = extracted_profile.careers if extracted_profile else None
+
     social_urls = []
     if social_rec.get("status") == "available":
         social_urls = [item.get("url") for item in (social_rec.get("value") or []) if isinstance(item, dict) and item.get("url")]
     if not social_urls and norm_website:
         website_value = website_rec.get("value") or {}
         social_urls = [item.get("url") for item in (website_value.get("social_links") or []) if isinstance(item, dict) and item.get("url")]
+
+    # Ingest verified hiring / ATS career channels into social/digital presence
+    hiring_urls = [h.get("url") for h in hiring_candidates if isinstance(h, dict) and h.get("url")]
+    if not hiring_urls and careers_field and careers_field.status == FieldStatus.FOUND and careers_field.value:
+        c_url = careers_field.value.get("careers_url") or careers_field.value.get("ats_careers_url")
+        if c_url:
+            hiring_urls.append(c_url)
+
+    for h_url in hiring_urls:
+        if h_url not in social_urls:
+            social_urls.append(h_url)
+
+    hiring_titles = [h.get("title") for h in hiring_candidates if isinstance(h, dict) and h.get("title")]
+
     if social_urls:
+        soc_source = social_rec.get("source_url") or (hiring_urls[0] if hiring_urls else norm_website)
+        soc_type = "public_search" if (social_rec.get("status") == "available" or hiring_urls) else "first_party_website"
+        soc_priority = SourcePriority.REPUTABLE_SECONDARY if soc_type == "public_search" else SourcePriority.FIRST_PARTY_WEBSITE
+        soc_conf = max(social_rec.get("confidence") or 0.0, hiring_rec.get("confidence") or 0.0, 0.9)
+        span_parts = []
+        if social_rec.get("status") == "available":
+            span_parts.append(f"Verified public social channels: {', '.join(social_urls)}")
+        if hiring_titles:
+            span_parts.append(f"Verified ATS job advertisement(s): {'; '.join(hiring_titles[:3])}")
+        elif hiring_urls:
+            span_parts.append(f"Verified career channel: {', '.join(hiring_urls)}")
+        span_text = " | ".join(span_parts) if span_parts else f"Verified channels: {', '.join(social_urls)}"
+
         facts[CoverageCategory.SOCIAL_PRESENCE] = CoverageFact(
             category=CoverageCategory.SOCIAL_PRESENCE, field_name="social_presence",
             value=social_urls, normalized_value=social_urls,
             status=CoverageFieldStatus.AVAILABLE,
-            source_url=social_rec.get("source_url") or norm_website,
-            source_type="public_search" if social_rec.get("status") == "available" else "first_party_website",
-            source_priority=SourcePriority.REPUTABLE_SECONDARY if social_rec.get("status") == "available" else SourcePriority.FIRST_PARTY_WEBSITE,
-            evidence_span=f"Verified public social channels: {', '.join(social_urls)}",
-            confidence=social_rec.get("confidence") or 0.9,
+            source_url=soc_source,
+            source_type=soc_type,
+            source_priority=soc_priority,
+            evidence_span=span_text,
+            confidence=soc_conf,
         )
     else:
         facts[CoverageCategory.SOCIAL_PRESENCE] = CoverageFact(
@@ -1758,6 +1803,14 @@ def build_unified_company_profile(
                     rejected_facts.append({"field": fld, **(itm if isinstance(itm, dict) else {"details": itm})})
             elif isinstance(items, dict):
                 rejected_facts.append({"field": fld, **items})
+
+    if isinstance(profile.get("rejected_hiring"), list):
+        for itm in profile["rejected_hiring"]:
+            rejected_facts.append({"field": "hiring", **(itm if isinstance(itm, dict) else {"details": itm})})
+
+    if isinstance(profile.get("rejected_news"), list):
+        for itm in profile["rejected_news"]:
+            rejected_facts.append({"field": "news", **(itm if isinstance(itm, dict) else {"details": itm})})
 
     if isinstance(profile.get("unsure_evidence"), dict):
         for fld, items in profile["unsure_evidence"].items():

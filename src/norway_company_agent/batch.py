@@ -358,6 +358,8 @@ def terminal_envelope(
         "completed_at": completed_at,
         "modules": module_states,
         "profile": profile,
+        "rejected_facts": contract.get("rejected_facts", []),
+        "unsure_facts": contract.get("unsure_facts", []),
     }
 
 
