@@ -279,23 +279,45 @@ def main() -> None:
                             profile["social_profiles"] = enrichment["social_profiles"]
                             profile["social_presence"] = enrichment["social_profiles"]
                             profile["social_links"] = enrichment["social_profiles"]
+                            first_soc = enrichment["social_profiles"][0]
                             profile["evidence"]["social_presence_search"] = evidence(
                                 "social_presence", "available", "public_search",
-                                "https://api.search.brave.com/res/v1/web/search",
+                                first_soc.get("url") or "https://api.search.brave.com/res/v1/web/search",
                                 value=enrichment["social_profiles"],
                                 organisation_number=profile["organisation_number"],
                                 company_name=profile.get("name"), identity_match=True,
                                 confidence=max(x.get("confidence", 0.0) for x in enrichment["social_profiles"]),
                                 verdict="confirmed",
                                 verdict_reason="Social profile matches company legal identity and operations",
+                                source_title=first_soc.get("platform") or first_soc.get("url"),
+                                publisher=first_soc.get("platform"),
                             )
+                            # Create individual evidence records for each accepted social profile
+                            for idx, soc in enumerate(enrichment["social_profiles"]):
+                                key = f"social_profile_{idx+1}"
+                                profile["evidence"][key] = evidence(
+                                    "social_presence",
+                                    "available",
+                                    "social_media_profile",
+                                    soc["url"],
+                                    value=soc,
+                                    source_title=soc.get("platform") or soc.get("url"),
+                                    publisher=soc.get("platform"),
+                                    retrieved_at=soc.get("retrieved_at") or utc_now(),
+                                    organisation_number=profile["organisation_number"],
+                                    company_name=profile.get("name"),
+                                    identity_match=True,
+                                    confidence=soc.get("confidence", 0.9),
+                                    verdict="confirmed",
+                                    verdict_reason="Social profile matches company legal identity and operations",
+                                )
                         if enrichment["news"]:
                             profile["public_activity_search"] = enrichment["news"]
                             profile["news_search"] = enrichment["news"]
                             first_news = enrichment["news"][0]
                             profile["evidence"]["news_search"] = evidence(
                                 "news", "available", "public_search",
-                                "https://api.search.brave.com/res/v1/web/search",
+                                first_news.get("url") or "https://api.search.brave.com/res/v1/web/search",
                                 value=enrichment["news"],
                                 organisation_number=profile["organisation_number"],
                                 company_name=profile.get("name"), identity_match=True,
@@ -304,7 +326,29 @@ def main() -> None:
                                 verdict_reason=first_news.get("verdict_reason") or f"Dated article on {first_news.get('publisher', 'media')} explicitly identifies requested company with verified publication date {first_news.get('published_at', '')}",
                                 publisher=first_news.get("publisher"),
                                 published_at=first_news.get("published_at"),
+                                source_title=first_news.get("title"),
                             )
+                            # Create individual evidence records for each accepted news article
+                            for idx, article in enumerate(enrichment["news"]):
+                                key = f"news_article_{idx+1}"
+                                profile["evidence"][key] = evidence(
+                                    "news",
+                                    "available",
+                                    "public_news",
+                                    article["url"],
+                                    value=article,
+                                    source_title=article.get("title"),
+                                    published_at=article.get("published_at") or article.get("date"),
+                                    publisher=article.get("publisher"),
+                                    retrieved_at=article.get("retrieved_at") or utc_now(),
+                                    organisation_number=profile["organisation_number"],
+                                    company_name=profile.get("name"),
+                                    identity_match=True,
+                                    evidence_excerpt=article.get("evidence_excerpt") or article.get("snippet"),
+                                    confidence=article.get("confidence", 0.85),
+                                    verdict="confirmed",
+                                    verdict_reason=article.get("verdict_reason") or f"Dated article on {article.get('publisher', 'media')} explicitly identifies requested company with verified publication date {article.get('published_at', '')}",
+                                )
                         if enrichment["hiring"]:
                             profile["hiring_search"] = enrichment["hiring"]
                             first_hire = enrichment["hiring"][0]
@@ -319,11 +363,31 @@ def main() -> None:
                                 verdict_reason=first_hire.get("verdict_reason") or "Individual active vacancy or careers page verified for the requested company",
                                 publisher=first_hire.get("publisher"),
                             )
+                            # Create individual evidence records for each accepted job vacancy
+                            for idx, job in enumerate(enrichment["hiring"]):
+                                key = f"job_vacancy_{idx+1}"
+                                profile["evidence"][key] = evidence(
+                                    "careers",
+                                    "available",
+                                    "ats_job_listing" if job.get("platform") else "company_careers_page",
+                                    job["url"],
+                                    value=job,
+                                    source_title=job.get("title"),
+                                    publisher=job.get("platform") or job.get("publisher"),
+                                    retrieved_at=job.get("retrieved_at") or utc_now(),
+                                    organisation_number=profile["organisation_number"],
+                                    company_name=profile.get("name"),
+                                    identity_match=True,
+                                    evidence_excerpt=job.get("evidence_excerpt"),
+                                    confidence=job.get("confidence", 0.9),
+                                    verdict="confirmed",
+                                    verdict_reason=job.get("verdict_reason") or "Individual active vacancy or careers page verified for the requested company",
+                                )
 
                         # Expose rejected hiring & news candidates in profile evidence for source-level inspection
                         if enrichment.get("rejected_hiring"):
-                            for idx, rej in enumerate(enrichment["rejected_hiring"][:3]):
-                                key = f"rejected_hiring_{idx+1}" if idx > 0 else "rejected_hiring"
+                            for idx, rej in enumerate(enrichment["rejected_hiring"][:5]):
+                                key = f"rejected_hiring_{idx+1}"
                                 profile["evidence"][key] = evidence(
                                     "careers", "not_found", "public_search",
                                     rej["url"],
@@ -332,10 +396,11 @@ def main() -> None:
                                     verdict="rejected",
                                     verdict_reason=rej["reason"],
                                     source_title=rej.get("title"),
+                                    publisher=rej.get("platform") or rej.get("publisher"),
                                 )
                         if enrichment.get("rejected_news"):
-                            for idx, rej in enumerate(enrichment["rejected_news"][:3]):
-                                key = f"rejected_news_{idx+1}" if idx > 0 else "rejected_news"
+                            for idx, rej in enumerate(enrichment["rejected_news"][:5]):
+                                key = f"rejected_news_{idx+1}"
                                 profile["evidence"][key] = evidence(
                                     "news", "not_found", "public_search",
                                     rej["url"],
@@ -344,6 +409,7 @@ def main() -> None:
                                     verdict="rejected",
                                     verdict_reason=rej["reason"],
                                     source_title=rej.get("title"),
+                                    publisher=rej.get("publisher"),
                                 )
 
                         # Compare registry website with independent search candidates

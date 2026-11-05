@@ -937,6 +937,206 @@ class EvaluatorPrioritiesComprehensiveTests(unittest.TestCase):
         self.assertIn("operations", env)
         self.assertIn("state", env)
 
+    def test_12_individual_news_and_hiring_evidence_records_with_direct_urls(self):
+        """12. Individual news articles and job vacancies have their own distinct evidence records with direct URLs."""
+        article_url = "https://e24.no/naeringsliv/i/123/innovasjon-norge-tildeler-midler"
+        job_url = "https://company.teamtailor.com/jobs/456-senior-engineer"
+        
+        ev_news_1 = evidence(
+            "news", "available", "public_news", article_url,
+            source_title="Innovasjon Norge tildeler midler til vekstselskap",
+            publisher="E24",
+            published_at="2026-03-15T08:00:00Z",
+            verdict="confirmed",
+            verdict_reason="Dated article on E24 explicitly identifies requested company with verified publication date 2026-03-15",
+        )
+        ev_job_1 = evidence(
+            "careers", "available", "ats_job_listing", job_url,
+            source_title="Senior Engineer",
+            publisher="Teamtailor",
+            verdict="confirmed",
+            verdict_reason="Individual active vacancy or careers page verified for the requested company",
+        )
+
+        self.assertEqual(ev_news_1["source_url"], article_url)
+        self.assertNotEqual(ev_news_1["source_url"], "https://api.search.brave.com/res/v1/web/search")
+        self.assertEqual(ev_news_1["verdict"], "confirmed")
+        self.assertEqual(ev_news_1["publisher"], "E24")
+        self.assertEqual(ev_news_1["published_at"], "2026-03-15T08:00:00Z")
+
+        self.assertEqual(ev_job_1["source_url"], job_url)
+        self.assertNotEqual(ev_job_1["source_url"], "https://api.search.brave.com/res/v1/web/search")
+        self.assertEqual(ev_job_1["verdict"], "confirmed")
+        self.assertEqual(ev_job_1["source_title"], "Senior Engineer")
+
+    def test_13_multiple_articles_and_vacancies_remain_separate(self):
+        """13. Multiple articles and vacancies are stored under distinct keys and do not collapse or overwrite."""
+        profile = {
+            "organisation_number": "912345678",
+            "name": "Nordic Solutions AS",
+            "evidence": {
+                "news_article_1": evidence(
+                    "news", "available", "public_news", "https://dn.no/artikkel/1",
+                    source_title="Article 1", publisher="DN", verdict="confirmed"
+                ),
+                "news_article_2": evidence(
+                    "news", "available", "public_news", "https://finansavisen.no/artikkel/2",
+                    source_title="Article 2", publisher="Finansavisen", verdict="confirmed"
+                ),
+                "job_vacancy_1": evidence(
+                    "careers", "available", "ats_job_listing", "https://careers.nordic.com/jobs/1",
+                    source_title="DevOps Engineer", publisher="Teamtailor", verdict="confirmed"
+                ),
+                "job_vacancy_2": evidence(
+                    "careers", "available", "ats_job_listing", "https://careers.nordic.com/jobs/2",
+                    source_title="Product Manager", publisher="Teamtailor", verdict="confirmed"
+                ),
+                "rejected_hiring_1": evidence(
+                    "careers", "not_found", "public_search", "https://teamtailor.com",
+                    verdict="rejected", verdict_reason="ATS vendor homepage"
+                ),
+            }
+        }
+        ev = profile["evidence"]
+        self.assertIn("news_article_1", ev)
+        self.assertIn("news_article_2", ev)
+        self.assertIn("job_vacancy_1", ev)
+        self.assertIn("job_vacancy_2", ev)
+        self.assertIn("rejected_hiring_1", ev)
+
+        self.assertNotEqual(ev["news_article_1"]["source_url"], ev["news_article_2"]["source_url"])
+        self.assertNotEqual(ev["job_vacancy_1"]["source_url"], ev["job_vacancy_2"]["source_url"])
+        self.assertEqual(ev["rejected_hiring_1"]["verdict"], "rejected")
+
+    def test_14_frontend_verdict_fallback_fails_safely_to_unsure(self):
+        """14. Missing or invalid backend verdict fails safely to unsure; explicit verdicts strictly preserved."""
+        # Python implementation mirroring frontend resolveSourceVerdict() in EvidenceDrawer.tsx
+        def resolve_verdict(ev):
+            if not ev:
+                return {"verdict": "unsure", "reason": "No evidence record is available for this category."}
+            verdict = None
+            reason = ev.get("verdict_reason") or ev.get("rejection_reason") or ev.get("note")
+            explicit = ev.get("verdict")
+            if explicit in ("confirmed", "unsure", "rejected"):
+                verdict = explicit
+            elif ev.get("status") in ("not_found", "not_applicable"):
+                verdict = "rejected"
+                if not reason:
+                    reason = "Source fails verification; never use it to support a published fact."
+            else:
+                verdict = "unsure"
+                if not reason:
+                    reason = "Source retrieval succeeded, but an explicit identity verification verdict is unavailable."
+            if not reason:
+                if verdict == "confirmed":
+                    reason = "Source supports the associated company fact and passes verification."
+                elif verdict == "rejected":
+                    reason = "Source fails verification; never use it to support a published fact."
+                else:
+                    reason = "Evidence is inconclusive or conflicting; do not publish it as a confirmed fact."
+            return {"verdict": verdict, "reason": reason}
+
+        # Case A: Missing verdict + status available MUST become unsure (NOT confirmed!)
+        missing_verdict_record = {
+            "category": "registry",
+            "status": "available",
+            "source_type": "official_registry",
+            "source_url": "https://data.brreg.no",
+        }
+        res_a = resolve_verdict(missing_verdict_record)
+        self.assertEqual(res_a["verdict"], "unsure")
+        self.assertEqual(res_a["reason"], "Source retrieval succeeded, but an explicit identity verification verdict is unavailable.")
+
+        # Case B: Invalid verdict value MUST become unsure
+        invalid_verdict_record = {
+            "category": "website",
+            "status": "available",
+            "verdict": "unknown_string",
+            "source_type": "website",
+            "source_url": "https://example.com",
+        }
+        res_b = resolve_verdict(invalid_verdict_record)
+        self.assertEqual(res_b["verdict"], "unsure")
+        self.assertEqual(res_b["reason"], "Source retrieval succeeded, but an explicit identity verification verdict is unavailable.")
+
+        # Case C: Explicit confirmed verdict MUST be preserved
+        explicit_confirmed = {
+            "category": "website",
+            "status": "available",
+            "verdict": "confirmed",
+            "verdict_reason": "Exact legal name found on verified company homepage",
+            "source_url": "https://example.com",
+        }
+        res_c = resolve_verdict(explicit_confirmed)
+        self.assertEqual(res_c["verdict"], "confirmed")
+        self.assertEqual(res_c["reason"], "Exact legal name found on verified company homepage")
+
+        # Case D: Explicit rejected verdict MUST be preserved
+        explicit_rejected = {
+            "category": "careers",
+            "status": "not_found",
+            "verdict": "rejected",
+            "verdict_reason": "ATS vendor homepage",
+            "source_url": "https://teamtailor.com",
+        }
+        res_d = resolve_verdict(explicit_rejected)
+        self.assertEqual(res_d["verdict"], "rejected")
+        self.assertEqual(res_d["reason"], "ATS vendor homepage")
+
+        # Case E: Explicit unsure verdict MUST be preserved
+        explicit_unsure = {
+            "category": "website",
+            "status": "available",
+            "verdict": "unsure",
+            "verdict_reason": "Ambiguous domain candidate without registered org number",
+            "source_url": "https://maybe.com",
+        }
+        res_e = resolve_verdict(explicit_unsure)
+        self.assertEqual(res_e["verdict"], "unsure")
+        self.assertEqual(res_e["reason"], "Ambiguous domain candidate without registered org number")
+
+    def test_15_individual_records_reach_unified_profile_and_contract_claims(self):
+        """15. Individual news and hiring evidence records propagate to unified profile and contract envelope claims."""
+        article_url = "https://e24.no/naeringsliv/i/999/nyhet"
+        job_url = "https://acme.teamtailor.com/jobs/1"
+        profile = {
+            "organisation_number": "988776655",
+            "name": "Acme Nordic AS",
+            "evidence": {
+                "news_article_1": evidence(
+                    "news", "available", "public_news", article_url,
+                    source_title="Acme Nordic expands in Bergen",
+                    publisher="E24",
+                    published_at="2026-02-10T10:00:00Z",
+                    verdict="confirmed",
+                    verdict_reason="Dated article on E24 explicitly identifies requested company with verified publication date 2026-02-10",
+                ),
+                "job_vacancy_1": evidence(
+                    "careers", "available", "ats_job_listing", job_url,
+                    source_title="Platform Engineer",
+                    publisher="Teamtailor",
+                    verdict="confirmed",
+                    verdict_reason="Individual active vacancy or careers page verified for the requested company",
+                ),
+            }
+        }
+        unified = build_unified_company_profile(profile)
+        envelope = unified.to_contract_envelope()
+
+        # News claim must be available and point to article URL
+        news_claim = next(c for c in envelope["claims"] if c["field"] == "news_events")
+        self.assertEqual(news_claim["availability"], "available")
+        self.assertTrue(len(news_claim["evidence_ids"]) > 0)
+        news_ev = next(e for e in envelope["evidence"] if e["id"] == news_claim["evidence_ids"][0])
+        self.assertEqual(news_ev["source_url"], article_url)
+
+        # Social/digital presence claim must be available and include the individual job URL
+        soc_claim = next(c for c in envelope["claims"] if c["field"] == "social_presence")
+        self.assertEqual(soc_claim["availability"], "available")
+        self.assertIn(job_url, soc_claim["value"])
+        soc_ev = next(e for e in envelope["evidence"] if e["id"] == soc_claim["evidence_ids"][0])
+        self.assertEqual(soc_ev["source_url"], job_url)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -90,11 +90,30 @@ export function CompanyInteractive({
   function openDrawer(key: string, ev: EvidenceRecord) {
     const label = key.replace(/_/g, " ");
     const value =
-      ev.status === "available"
+      ev.source_title ||
+      ev.source_url ||
+      (ev.status === "available"
         ? "Available"
-        : statusLabel(ev.status);
+        : statusLabel(ev.status));
     setDrawerState({ open: true, ev, label, value });
   }
+
+  const hasIndividualNews = Object.keys(evidence || {}).some((k) =>
+    k.startsWith("news_article_")
+  );
+  const hasIndividualHiring = Object.keys(evidence || {}).some((k) =>
+    k.startsWith("job_vacancy_")
+  );
+  const hasIndividualSocial = Object.keys(evidence || {}).some((k) =>
+    k.startsWith("social_profile_")
+  );
+
+  const displayedEvidence = Object.entries(evidence || {}).filter(([key]) => {
+    if (key === "news_search" && hasIndividualNews) return false;
+    if (key === "hiring_search" && hasIndividualHiring) return false;
+    if (key === "social_presence_search" && hasIndividualSocial) return false;
+    return true;
+  });
 
   return (
     <>
@@ -135,7 +154,7 @@ export function CompanyInteractive({
         )}
         <div className="surface-elevated" style={{ padding: "24px" }}>
           <div className="evidence-chain">
-            {Object.entries(evidence || {}).map(([key, ev]) => {
+            {displayedEvidence.map(([key, ev]) => {
               const verdictInfo = resolveSourceVerdict(ev);
               return (
                 <button
@@ -183,11 +202,42 @@ export function CompanyInteractive({
                       </span>
                     </div>
                   </div>
+                  {ev.source_title && (
+                    <div
+                      style={{
+                        fontSize: "0.875rem",
+                        fontWeight: 600,
+                        color: "var(--text-primary)",
+                        marginBottom: "4px",
+                        wordBreak: "break-word",
+                      }}
+                    >
+                      {ev.source_title}
+                    </div>
+                  )}
+                  {ev.source_url && (
+                    <div
+                      className="text-caption"
+                      style={{
+                        color: "var(--text-accent)",
+                        marginBottom: "4px",
+                        wordBreak: "break-all",
+                        fontSize: "0.75rem",
+                      }}
+                    >
+                      {ev.source_url}
+                    </div>
+                  )}
                   <div className="text-caption">
-                    Source:{" "}
-                    <span style={{ color: "var(--text-accent)" }}>
-                      {ev.source_type}
+                    Source Type:{" "}
+                    <span style={{ color: "var(--text-secondary)" }}>
+                      {ev.source_class || ev.source_type}
                     </span>
+                    {ev.publisher && (
+                      <span style={{ marginLeft: "8px" }}>
+                        · Publisher: <strong style={{ color: "var(--text-primary)" }}>{ev.publisher}</strong>
+                      </span>
+                    )}
                   </div>
                   <div className="text-caption">
                     Retrieved: {formatDateTime(ev.retrieved_at)}

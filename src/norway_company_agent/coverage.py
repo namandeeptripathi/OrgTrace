@@ -1537,7 +1537,21 @@ def build_unified_company_profile(
     # ------------------------------------------------------------------------
     news_field = extracted_profile.news if extracted_profile else None
     search_news = evidence_dict.get("news_search") or {}
-    search_news_value = search_news.get("value") or []
+    search_news_value = list(search_news.get("value") or profile.get("news_search") or [])
+    if not search_news_value:
+        for k, v in evidence_dict.items():
+            if k.startswith("news_article_") and isinstance(v, dict):
+                art_val = v.get("value")
+                if isinstance(art_val, dict):
+                    search_news_value.append(art_val)
+                elif v.get("source_url"):
+                    search_news_value.append({
+                        "url": v.get("source_url"),
+                        "title": v.get("source_title"),
+                        "date": v.get("published_at") or v.get("retrieved_at"),
+                        "publisher": v.get("publisher"),
+                    })
+
     news_candidates = []
     news_source = norm_website
     news_type = "company_website"
@@ -1547,7 +1561,7 @@ def build_unified_company_profile(
         news_source = news_field.source_url or news_source
         news_type = news_field.source_type or news_type
         news_conf = max(news_conf, news_field.confidence or 0.85)
-    if search_news.get("status") == "available" and search_news_value:
+    if (search_news.get("status") == "available" or search_news_value):
         seen_urls = {n.get("url") for n in news_candidates if isinstance(n, dict)}
         for n in search_news_value:
             if isinstance(n, dict) and n.get("url") not in seen_urls:
@@ -1560,6 +1574,8 @@ def build_unified_company_profile(
 
     confirmed_news = [n for n in news_candidates if isinstance(n, dict) and n.get("title") and n.get("date")] if news_candidates else []
     if confirmed_news:
+        if not news_source or news_source == norm_website or "search.brave.com" in news_source:
+            news_source = confirmed_news[0].get("url") or news_source
         facts[CoverageCategory.NEWS_EVENTS] = CoverageFact(
             category=CoverageCategory.NEWS_EVENTS, field_name="news_events",
             value=confirmed_news,
@@ -1585,7 +1601,19 @@ def build_unified_company_profile(
     # ------------------------------------------------------------------------
     social_rec = evidence_dict.get("social_presence_search") or {}
     hiring_rec = evidence_dict.get("hiring_search") or {}
-    hiring_candidates = hiring_rec.get("value") or profile.get("hiring_search") or []
+    hiring_candidates = list(hiring_rec.get("value") or profile.get("hiring_search") or [])
+    if not hiring_candidates:
+        for k, v in evidence_dict.items():
+            if k.startswith("job_vacancy_") and isinstance(v, dict):
+                job_val = v.get("value")
+                if isinstance(job_val, dict):
+                    hiring_candidates.append(job_val)
+                elif v.get("source_url"):
+                    hiring_candidates.append({
+                        "url": v.get("source_url"),
+                        "title": v.get("source_title"),
+                        "platform": v.get("publisher"),
+                    })
     careers_field = extracted_profile.careers if extracted_profile else None
 
     social_urls = []
@@ -1609,7 +1637,7 @@ def build_unified_company_profile(
     hiring_titles = [h.get("title") for h in hiring_candidates if isinstance(h, dict) and h.get("title")]
 
     if social_urls:
-        soc_source = social_rec.get("source_url") or (hiring_urls[0] if hiring_urls else norm_website)
+        soc_source = social_urls[0]
         soc_type = "public_search" if (social_rec.get("status") == "available" or hiring_urls) else "first_party_website"
         soc_priority = SourcePriority.REPUTABLE_SECONDARY if soc_type == "public_search" else SourcePriority.FIRST_PARTY_WEBSITE
         soc_conf = max(social_rec.get("confidence") or 0.0, hiring_rec.get("confidence") or 0.0, 0.9)

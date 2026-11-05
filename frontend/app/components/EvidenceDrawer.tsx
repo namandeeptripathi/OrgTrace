@@ -36,39 +36,23 @@ export function resolveSourceVerdict(evidence: EvidenceRecord | null): SourceVer
     };
   }
 
-  // 1. Explicit verdict on evidence record
+  // 1. Explicit valid backend verdict takes precedence
   let verdict: SourceVerdict;
+  let reason = evidence.verdict_reason || evidence.rejection_reason || evidence.note;
+
   if (evidence.verdict === "confirmed" || evidence.verdict === "unsure" || evidence.verdict === "rejected") {
     verdict = evidence.verdict;
-  } else if (evidence.status === "available") {
-    verdict = "confirmed";
   } else if (evidence.status === "not_found" || evidence.status === "not_applicable") {
+    // Explicit not found or not applicable remains rejected
     verdict = "rejected";
-  } else {
-    // timeout, rate_limited, unavailable, not_attempted, blocked_*, parse_failed
-    verdict = "unsure";
-  }
-
-  // 2. Short, specific non-fabricated reason
-  let reason = evidence.verdict_reason || evidence.rejection_reason || evidence.note;
-  if (!reason) {
-    if (verdict === "confirmed") {
-      const src = (evidence.source_type || evidence.source_class || "").toLowerCase();
-      if (src.includes("registry")) {
-        reason = "Official Enhetsregisteret statutory filing passes identity verification.";
-      } else if (src.includes("website")) {
-        reason = "Exact legal company name found on the company's own website.";
-      } else if (src.includes("news")) {
-        reason = "Dated article explicitly mentions requested company with verified publication date.";
-      } else if (src.includes("career") || src.includes("hiring")) {
-        reason = "Individual active vacancy or careers page verified for the requested company.";
-      } else {
-        reason = "Source supports the associated company fact and passes verification.";
-      }
-    } else if (verdict === "rejected") {
+    if (!reason) {
       reason = "Source fails verification; never use it to support a published fact.";
-    } else {
-      reason = "Evidence is inconclusive or conflicting; do not publish it as a confirmed fact.";
+    }
+  } else {
+    // Missing, invalid, or status === "available" without explicit verdict MUST fail safely to "unsure"
+    verdict = "unsure";
+    if (!reason) {
+      reason = "Source retrieval succeeded, but an explicit identity verification verdict is unavailable.";
     }
   }
 
@@ -76,7 +60,7 @@ export function resolveSourceVerdict(evidence: EvidenceRecord | null): SourceVer
     return {
       verdict,
       label: "Confirmed",
-      reason,
+      reason: reason || "Source supports the associated company fact and passes verification.",
       badgeClass: "badge-green",
       icon: "✓",
       themeColor: "var(--accent-green)",
@@ -87,7 +71,7 @@ export function resolveSourceVerdict(evidence: EvidenceRecord | null): SourceVer
     return {
       verdict,
       label: "Unsure",
-      reason,
+      reason: reason || "Source retrieval succeeded, but an explicit identity verification verdict is unavailable.",
       badgeClass: "badge-amber",
       icon: "?",
       themeColor: "var(--accent-amber)",
@@ -98,7 +82,7 @@ export function resolveSourceVerdict(evidence: EvidenceRecord | null): SourceVer
     return {
       verdict,
       label: "Rejected",
-      reason,
+      reason: reason || "Source fails verification; never use it to support a published fact.",
       badgeClass: "badge-red",
       icon: "✕",
       themeColor: "var(--accent-red)",
