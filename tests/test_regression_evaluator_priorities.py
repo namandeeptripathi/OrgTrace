@@ -1138,5 +1138,144 @@ class EvaluatorPrioritiesComprehensiveTests(unittest.TestCase):
         self.assertEqual(soc_ev["source_url"], job_url)
 
 
+class OrganiserReferenceValidationTests(unittest.TestCase):
+    """Regression tests for organiser-reported reference cases & priorities:
+    1. ELOPAK ASA (811413682) - SPA website discovery & identity gating.
+    2. G3 GAUSDAL TREINDUSTRIER SA (811943622) - Multi-token homepage match & LinkedIn verification.
+    3. EQUINOR ASA (923609016) - Careers page discovery & individual vacancy claims vs generic ATS rejection.
+    4. SUNNAAS SYKEHUS HF (883971752) - Dated news article discovery vs undated rejection.
+    """
+
+    def test_elopak_spa_website_discovery_and_publishable(self):
+        from scripts.run_competition_batch import generate_candidate_domains
+        domains = generate_candidate_domains("ELOPAK ASA")
+        self.assertIn("elopak.no", domains)
+        self.assertIn("elopak.com", domains)
+
+        profile = {
+            "name": "ELOPAK ASA",
+            "organisation_number": "811413682",
+            "evidence": {
+                "website": {
+                    "source_url": "https://www.elopak.com",
+                    "status": "available",
+                    "value": {
+                        "final_url": "https://www.elopak.com/",
+                        "title": "Elopak - Elopak",
+                        "description": "Leading global supplier of carton packaging and filling equipment.",
+                        "main_text_excerpt": "",
+                        "raw_html_size": 65000,
+                    },
+                }
+            },
+        }
+        assessment = assess_website_identity(profile)
+        self.assertTrue(assessment["publishable"])
+        self.assertGreaterEqual(assessment["score"], 0.9)
+        self.assertEqual(assessment["status"], "exact")
+
+    def test_g3_gausdal_treindustrier_website_and_social_verification(self):
+        from norway_company_agent.identity import assess_social_identity
+        profile = {
+            "name": "G3 GAUSDAL TREINDUSTRIER SA",
+            "organisation_number": "811943622",
+            "evidence": {
+                "website": {
+                    "source_url": "https://g3i.no",
+                    "status": "available",
+                    "value": {
+                        "final_url": "https://g3i.no/",
+                        "title": "G3",
+                        "main_text_excerpt": "G3 Gausdal Treindustrier - G3I Produkter og trelast for proffe og selvbyggere.",
+                    },
+                }
+            },
+        }
+        assessment = assess_website_identity(profile)
+        self.assertTrue(assessment["publishable"])
+        self.assertGreaterEqual(assessment["score"], 0.95)
+        self.assertEqual(assessment["status"], "exact")
+
+        # Official company LinkedIn handle
+        good_social = {"platform": "linkedin", "url": "https://www.linkedin.com/company/g3-gausdal-treindustrier-sa"}
+        good_eval = assess_social_identity(profile, good_social)
+        self.assertTrue(good_eval["publishable"])
+        self.assertGreaterEqual(good_eval["identity_score"], 0.9)
+
+        # Web agency or unrelated brand handle on website
+        bad_social = {"platform": "facebook", "url": "https://www.facebook.com/webdesignbureauet"}
+        bad_eval = assess_social_identity(profile, bad_social)
+        self.assertFalse(bad_eval["publishable"])
+        self.assertLess(bad_eval["identity_score"], 0.5)
+
+    def test_equinor_careers_page_and_vacancy_contract_envelope(self):
+        careers_url = "https://www.equinor.com/careers"
+        job_url = "https://www.equinor.com/careers/jobs/senior-subsea-engineer-101"
+        profile = {
+            "name": "EQUINOR ASA",
+            "organisation_number": "923609016",
+            "evidence": {
+                "careers_page": evidence(
+                    "careers", "available", "website_careers_page", careers_url,
+                    source_title="EQUINOR ASA Careers",
+                    publisher="company_website",
+                    verdict="confirmed",
+                    verdict_reason=f"Verified company careers page at {careers_url}",
+                ),
+                "job_vacancy_1": evidence(
+                    "careers", "available", "first_party_job_posting", job_url,
+                    source_title="Senior Subsea Engineer",
+                    publisher="company_website",
+                    verdict="confirmed",
+                    verdict_reason="Verified individual job advertisement for EQUINOR ASA",
+                ),
+            },
+        }
+        unified = build_unified_company_profile(profile)
+        envelope = unified.to_contract_envelope()
+
+        # Hiring / career presence must reach claims
+        soc_claim = next(c for c in envelope["claims"] if c["field"] == "social_presence")
+        self.assertEqual(soc_claim["availability"], "available")
+        self.assertTrue(any(careers_url in str(v) or job_url in str(v) for v in soc_claim["value"]))
+
+        # Generic ATS vendor homepages must be rejected
+        soup = BeautifulSoup('<a href="https://www.teamtailor.com">Careers</a>', "lxml")
+        ats_links = extract_ats_links(soup, "https://example.com")
+        self.assertEqual(len(ats_links), 0)
+
+    def test_sunnaas_dated_news_article_contract_envelope(self):
+        article_url = "https://www.sunnaas.no/aktuelt/bedre-sosial-funksjon-etter-hjerneskade"
+        profile = {
+            "name": "SUNNAAS SYKEHUS HF",
+            "organisation_number": "883971752",
+            "evidence": {
+                "news_article_1": evidence(
+                    "news", "available", "website_news_page", article_url,
+                    source_title="Bedre sosial funksjon etter hjerneskade",
+                    published_at="2026-03-15",
+                    publisher="Sunnaas Sykehus",
+                    verdict="confirmed",
+                    verdict_reason="Dated article explicitly identifies SUNNAAS SYKEHUS HF with verified publication date 2026-03-15",
+                ),
+                "undated_news_1": evidence(
+                    "news", "available", "website_news_page", "https://www.sunnaas.no/nyheter/arkiv",
+                    source_title="Nyhetsarkiv",
+                    verdict="unsure",
+                    verdict_reason="Article lacks verified publication date; undated or modified items cannot support confirmed claims",
+                ),
+            },
+        }
+        unified = build_unified_company_profile(profile)
+        envelope = unified.to_contract_envelope()
+
+        news_claim = next(c for c in envelope["claims"] if c["field"] == "news_events")
+        self.assertEqual(news_claim["availability"], "available")
+        # Confirmed dated article must be present in claim value
+        self.assertIn("Bedre sosial funksjon etter hjerneskade", news_claim["value"])
+        # Undated news must NOT leak into confirmed claim value
+        self.assertNotIn("Nyhetsarkiv", news_claim["value"])
+
+
 if __name__ == "__main__":
     unittest.main()

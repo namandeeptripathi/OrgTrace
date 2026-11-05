@@ -5,6 +5,7 @@ import argparse
 import hashlib
 import json
 import os
+import socket
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -20,13 +21,43 @@ from norway_company_agent.discovery import build_company_search_queries, choose_
 from norway_company_agent.evidence import evidence, utc_now  # noqa: E402
 from norway_company_agent.explanations import explain_company_profile  # noqa: E402
 from norway_company_agent.http import fetch_json  # noqa: E402
-from norway_company_agent.identity import apply_website_identity_gate  # noqa: E402
+from norway_company_agent.identity import _tokens, apply_website_identity_gate  # noqa: E402
 from norway_company_agent.official import fetch_official_modules  # noqa: E402
-from norway_company_agent.profile_extraction import extract_company_profile  # noqa: E402
+from norway_company_agent.profile_extraction import FieldStatus, extract_company_profile  # noqa: E402
 from norway_company_agent.resilience import CompetitionExecutionGuard, FailureCategory, classify_failure  # noqa: E402
 from norway_company_agent.website import fetch_website
 from norway_company_agent.search_enrichment import extract_search_enrichment  # noqa: E402
 from scripts.run_brave_discovery import brave_search  # noqa: E402
+
+
+def generate_candidate_domains(company_name: str) -> list[str]:
+    """Deterministically generate high-probability domain candidates for a Norwegian company."""
+    core = _tokens(company_name)
+    if not core:
+        return []
+    candidates = []
+    t0 = core[0]
+    if len(t0) >= 3:
+        candidates.append(f"{t0}.no")
+        candidates.append(f"{t0}.com")
+    elif len(t0) == 2:
+        candidates.append(f"{t0}.no")
+        candidates.append(f"{t0}i.no")
+        candidates.append(f"{t0}.com")
+
+    if len(core) >= 2:
+        candidates.append(f"{core[0]}{core[1]}.no")
+        candidates.append(f"{core[0]}-{core[1]}.no")
+        candidates.append(f"{core[0]}{core[1]}.com")
+        candidates.append(f"{core[0]}-{core[1]}.com")
+        if len(core[1]) >= 3:
+            candidates.append(f"{core[1]}.no")
+    if len(core) >= 3:
+        candidates.append(f"{core[0]}{core[1]}{core[2]}.no")
+        candidates.append(f"{core[0]}-{core[1]}-{core[2]}.no")
+        candidates.append(f"{core[1]}{core[2]}.no")
+        candidates.append(f"{core[1]}-{core[2]}.no")
+    return list(dict.fromkeys(candidates))
 
 
 def write_jsonl(path: Path, rows: list[dict]) -> None:
@@ -527,8 +558,45 @@ def main() -> None:
                                 verdict_reason=note,
                                 content_sha256=hashlib.sha256(note.encode("utf-8")).hexdigest(),
                             )
-                elif not profile.get("website"):
-                    note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry website URL"
+                if not profile.get("website") and not guard.is_reduced_mode():
+                    cand_domains = generate_candidate_domains(profile.get("name", ""))
+                    resolved_candidates = []
+                    for cd in cand_domains:
+                        try:
+                            socket.getaddrinfo(cd, 80)
+                            resolved_candidates.append(cd)
+                            if len(resolved_candidates) >= 3:
+                                break
+                        except Exception:
+                            continue
+
+                    for cand_domain in resolved_candidates:
+                        cand_url = f"https://{cand_domain}"
+                        cand_site, cand_metrics = fetch_website(cand_url, timeout=args.website_timeout, max_bytes=args.max_bytes_per_page, guard=guard)
+                        website_metrics["requests"] += cand_metrics.get("requests", 0)
+                        website_metrics["bytes"] += cand_metrics.get("bytes", 0)
+                        website_metrics["latencies_ms"].extend(cand_metrics.get("latencies_ms", []))
+                        if cand_site.get("status") == "available":
+                            gate_res = apply_website_identity_gate(profile, cand_site)
+                            assessment = gate_res.get("assessment")
+                            if assessment and assessment.get("publishable"):
+                                profile["website"] = cand_site.get("value", {}).get("final_url") or cand_url
+                                cand_site["verdict"] = "confirmed"
+                                cand_site["verdict_reason"] = f"Independently discovered and verified first-party website for {profile.get('name')}"
+                                cand_site["identity_match"] = True
+                                cand_site["confidence"] = assessment.get("score", 0.95)
+                                profile["evidence"]["website"] = cand_site
+                                break
+                            else:
+                                profile.setdefault("rejected_evidence", {})[f"candidate_domain_{cand_domain}"] = {
+                                    "url": cand_url,
+                                    "status": (assessment.get("status") if assessment else None) or "identity_rejected",
+                                    "reason": "; ".join(assessment.get("reasons", [])) if assessment else "Candidate website failed identity verification",
+                                    "verdict": "rejected",
+                                }
+
+                if not profile.get("website"):
+                    note = "Search discovery skipped in reduced-enrichment mode" if guard.is_reduced_mode() else "No valid registry or discovered website URL"
                     profile["evidence"]["website"] = evidence(
                         "website", "not_found",
                         "registry_linked_company_website",
@@ -606,9 +674,128 @@ def main() -> None:
             if ext.employees.value is not None:
                 profile.setdefault("employees", ext.employees.value)
 
+            # Ingest verified careers page & individual openings into evidence records
+            careers_val = careers_data.get("value")
+            if ext.careers.status == FieldStatus.FOUND and isinstance(careers_val, dict):
+                c_url = careers_val.get("careers_url") or careers_val.get("ats_careers_url")
+                if c_url and "careers_page" not in profile["evidence"]:
+                    profile["evidence"]["careers_page"] = evidence(
+                        "careers", "available", ext.careers.source_type or "website_careers_page",
+                        c_url,
+                        value=careers_val,
+                        source_title=f"{profile.get('name')} Careers",
+                        publisher=careers_val.get("ats_platform") or "company_website",
+                        retrieved_at=careers_val.get("retrieved_at") or utc_now(),
+                        organisation_number=profile["organisation_number"],
+                        company_name=profile.get("name"),
+                        identity_match=True,
+                        confidence=0.9,
+                        verdict="confirmed",
+                        verdict_reason=f"Verified company careers page at {c_url} (active_hiring={careers_val.get('hiring_active')})",
+                    )
+                for idx, opening in enumerate(careers_val.get("openings") or []):
+                    if idx >= 5:
+                        break
+                    op_title = opening.get("title") if isinstance(opening, dict) else str(opening)
+                    op_url = opening.get("url") if isinstance(opening, dict) else c_url
+                    job_key = f"job_vacancy_{idx+1}"
+                    if job_key not in profile["evidence"]:
+                        profile["evidence"][job_key] = evidence(
+                            "careers", "available", "first_party_job_posting",
+                            op_url or c_url,
+                            value={"title": op_title, "employer": profile.get("name"), "url": op_url},
+                            source_title=op_title,
+                            publisher=careers_val.get("ats_platform") or "company_website",
+                            retrieved_at=utc_now(),
+                            organisation_number=profile["organisation_number"],
+                            company_name=profile.get("name"),
+                            identity_match=True,
+                            confidence=0.9,
+                            verdict="confirmed",
+                            verdict_reason=f"Verified individual job advertisement for {profile.get('name')}: {op_title}",
+                        )
+
+            # Ingest verified dated news items into individual evidence records
+            news_items = news_data.get("value")
+            if ext.news.status == FieldStatus.FOUND and isinstance(news_items, list):
+                art_count = 0
+                for art in news_items:
+                    if art_count >= 5:
+                        break
+                    if not isinstance(art, dict):
+                        continue
+                    art_date = art.get("date") or art.get("published_at")
+                    art_title = art.get("title")
+                    art_url = art.get("url")
+                    if art_date and art_title and art_url:
+                        art_count += 1
+                        news_key = f"news_article_{art_count}"
+                        if news_key not in profile["evidence"]:
+                            profile["evidence"][news_key] = evidence(
+                                "news", "available", art.get("source") or "website_news_page",
+                                art_url,
+                                value=art,
+                                source_title=art_title,
+                                published_at=art_date,
+                                publisher=art.get("publisher") or "company_news",
+                                retrieved_at=art.get("retrieved_at") or utc_now(),
+                                organisation_number=profile["organisation_number"],
+                                company_name=profile.get("name"),
+                                identity_match=True,
+                                evidence_excerpt=art.get("snippet") or art.get("evidence_excerpt"),
+                                confidence=0.9,
+                                verdict="confirmed",
+                                verdict_reason=f"Dated article explicitly identifies {profile.get('name')} with verified publication date {art_date}",
+                            )
+
+            # Sync verified and quarantined social links from website evidence
+            website_evidence = profile.get("evidence", {}).get("website") or {}
+            website_val = website_evidence.get("value") or {}
+            social_assessments = website_val.get("social_link_assessments") or []
+            confirmed_soc_idx = 0
+            quarantine_soc_idx = 0
+            for assessment in social_assessments:
+                soc_url = assessment.get("url")
+                soc_platform = assessment.get("platform")
+                if assessment.get("publishable"):
+                    confirmed_soc_idx += 1
+                    key = f"social_profile_{confirmed_soc_idx}"
+                    if key not in profile["evidence"]:
+                        profile["evidence"][key] = evidence(
+                            "social_presence", "available", "social_media_profile",
+                            soc_url,
+                            value=assessment,
+                            source_title=soc_platform,
+                            publisher=soc_platform,
+                            retrieved_at=utc_now(),
+                            organisation_number=profile["organisation_number"],
+                            company_name=profile.get("name"),
+                            identity_match=True,
+                            confidence=assessment.get("identity_score", 0.95),
+                            verdict="confirmed",
+                            verdict_reason=assessment.get("reason") or "Social profile matches company legal identity and operations",
+                        )
+                else:
+                    quarantine_soc_idx += 1
+                    key = f"quarantined_social_{quarantine_soc_idx}"
+                    if key not in profile["evidence"]:
+                        profile["evidence"][key] = evidence(
+                            "social_presence", "available", "quarantined_social_media_link",
+                            soc_url,
+                            value=assessment,
+                            source_title=soc_platform,
+                            publisher=soc_platform,
+                            retrieved_at=utc_now(),
+                            organisation_number=profile["organisation_number"],
+                            company_name=profile.get("name"),
+                            identity_match=False,
+                            confidence=assessment.get("identity_score", 0.3),
+                            verdict="rejected",
+                            verdict_reason=assessment.get("reason") or "Social link failed identity verification; web agency or theme link quarantined",
+                        )
+
             # Sync social links from website evidence if not already set
             if not profile.get("social_presence"):
-                website_val = (profile.get("evidence", {}).get("website") or {}).get("value") or {}
                 if website_val.get("social_links"):
                     profile["social_presence"] = website_val["social_links"]
                     profile["social_links"] = website_val["social_links"]

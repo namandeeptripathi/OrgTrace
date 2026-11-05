@@ -502,7 +502,15 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
         soup = BeautifulSoup(html, "lxml")
         structured = extruct.extract(html, base_url=final_url, syntaxes=["json-ld", "microdata", "opengraph"])
         text = trafilatura.extract(html, url=final_url, include_links=False, include_tables=False, favor_precision=True) or ""
+        if len(text) < 100:
+            fallback_text = " ".join(t.get_text(" ", strip=True) for t in soup.find_all(["h1", "h2", "h3", "p", "a", "button"]))
+            if len(fallback_text.strip()) > len(text):
+                text = fallback_text.strip()
         title = soup.title.get_text(" ", strip=True) if soup.title else ""
+        if not title:
+            og_t = soup.select_one('meta[property="og:title"], meta[property="og:site_name"], meta[name="twitter:title"]')
+            if og_t and og_t.get("content"):
+                title = str(og_t.get("content") or "").strip()
         description_tag = soup.select_one('meta[name="description"], meta[property="og:description"]')
         description = str(description_tag.get("content") or "").strip() if description_tag else ""
         homepage_ats = extract_ats_links(soup, final_url)
@@ -513,6 +521,7 @@ def fetch_website(url: str | None, *, timeout: float = 15.0, max_bytes: int = 2_
             "title": title[:500],
             "description": description[:2000],
             "main_text_excerpt": text[:5000],
+            "raw_html_size": len(html),
             "social_links": _social_links(final_url, soup),
             "structured_organisations": _jsonld_organisations(structured),
             "content_sha256": __import__("hashlib").sha256(raw).hexdigest(),

@@ -1619,12 +1619,23 @@ def build_unified_company_profile(
     social_urls = []
     if social_rec.get("status") == "available":
         social_urls = [item.get("url") for item in (social_rec.get("value") or []) if isinstance(item, dict) and item.get("url")]
+    if not social_urls:
+        for k, v in evidence_dict.items():
+            if k.startswith("social_profile_") and isinstance(v, dict):
+                u = v.get("source_url")
+                if u and u not in social_urls:
+                    social_urls.append(u)
     if not social_urls and norm_website:
         website_value = website_rec.get("value") or {}
         social_urls = [item.get("url") for item in (website_value.get("social_links") or []) if isinstance(item, dict) and item.get("url")]
 
     # Ingest verified hiring / ATS career channels into social/digital presence
     hiring_urls = [h.get("url") for h in hiring_candidates if isinstance(h, dict) and h.get("url")]
+    careers_page_rec = evidence_dict.get("careers_page") or {}
+    if careers_page_rec.get("source_url") and careers_page_rec.get("verdict") == "confirmed":
+        cp_u = careers_page_rec.get("source_url")
+        if cp_u and cp_u not in hiring_urls:
+            hiring_urls.append(cp_u)
     if not hiring_urls and careers_field and careers_field.status == FieldStatus.FOUND and careers_field.value:
         c_url = careers_field.value.get("careers_url") or careers_field.value.get("ats_careers_url")
         if c_url:

@@ -123,8 +123,19 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
     )
     normalized_raw = unicodedata.normalize("NFKD", candidate_text).encode("ascii", "ignore").decode().casefold()
     homepage_token_sets = [set(_tokens(part)) for part in homepage_identity_parts if part]
-    exact_homepage_name = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
-    substantive_homepage = len(str(value.get("main_text_excerpt") or value.get("main_text") or "").strip()) >= 100
+    exact_in_header = bool(core and any(set(core).issubset(tokens) for tokens in homepage_token_sets))
+    header_tokens = set().union(*homepage_token_sets) if homepage_token_sets else set()
+    body_tokens = set(_tokens(value.get("main_text_excerpt") or value.get("main_text") or ""))
+    full_in_body = bool(core and set(core).issubset(body_tokens))
+    has_header_anchor = bool(set(core) & header_tokens)
+    exact_homepage_name = exact_in_header or (full_in_body and has_header_anchor)
+    raw_html_len = len(str(value.get("raw_html") or ""))
+    substantive_homepage = (
+        len(str(value.get("main_text_excerpt") or value.get("main_text") or "").strip()) >= 100
+        or len(str(value.get("description") or "").strip()) >= 40
+        or raw_html_len >= 5000
+        or (bool(core) and clean_host and clean_host.split(".")[0] == core[0] and bool(value.get("title")))
+    )
     is_business_sports_club = bool(re.search(r"(?:^|\s)B\.?\s*I\.?\s*L\.?(?:\s|$)", str(profile.get("name") or ""), re.I))
 
     # 3. Detect valid Modulo-11 Norwegian organisation numbers on page (supporting 9-digit or 3-3-3 spaced formats)
