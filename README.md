@@ -1,7 +1,7 @@
 # OrgTrace — Norwegian Enterprise Intelligence Engine
 
 > **A deterministic, evidence-grounded research pipeline and production web application for Norwegian enterprise intelligence.**<br/>
-> OrgTrace resolves corporate identity, official financial filings, and first-party digital footprints with cryptographic provenance, strict auditability, and zero hallucinations.
+> OrgTrace resolves corporate identity, official financial filings, and first-party digital footprints with cryptographic provenance, strict auditability, and no ungrounded assertions.
 
 [![Live Demo: Vercel](https://img.shields.io/badge/Live_Demo-org--trace.vercel.app-000000?style=flat&logo=vercel)](https://org-trace.vercel.app)
 [![Backend API: Railway](https://img.shields.io/badge/API-Railway-0B0D0E?style=flat&logo=railway)](https://orgtrace-production-07b0.up.railway.app)
@@ -62,13 +62,13 @@ Automated corporate research frequently suffers from entity confusion, hallucina
 │           │           │             │              │               │
 │           ▼           │             │              ▼               │
 │ Hallucinated Claims / │             │ Cryptographic SHA-256 Hashes │
-│ Entity Drift Risk     │             │ Zero Silent Drops / 100% Provenance
+│ Entity Drift Risk     │             │ Zero Silent Drops / Provenance
 └───────────────────────┘             └──────────────────────────────┘
 ```
 
 1. **Exact-Identity Boundary**: Corporate identity is anchored exclusively in statutory registers. Subsidiaries, parent holdings, and lookalikes lacking exact organisation number correlation are rejected.
 2. **Cryptographic Provenance**: Every emitted claim carries an immutable evidence record: source URL, retrieval timestamp, content SHA-256 hash, and exact text span.
-3. **Zero-Hallucination Explanations**: A 4-tier source hierarchy ensures explanations synthesize verified evidence only. A strict validation layer replaces any ungrounded assertion with a safe deterministic fallback.
+3. **Grounded Explanations (Zero Ungrounded Assertions)**: A 4-tier source hierarchy ensures explanations synthesize verified evidence only. A strict validation layer replaces any ungrounded assertion with a safe deterministic fallback.
 4. **Failed-Refresh Preservation**: Upstream API outages (HTTP 5xx, timeouts) never cause false removals of previously verified data. Outages are recorded as source errors, preserving existing truth.
 5. **Bounded Resource Guarding**: `SharedBudgetTracker` enforces thread-safe ceilings on HTTP requests (≤ 2,000), total runtime (≤ 45 min), and cost ($0.00 third-party fees), preventing runaway jobs.
 6. **Strict Scraping Ethics**: Fully compliant with NLOD 2.0 public data licenses and robots.txt. Does not scrape commercial walled gardens (`proff.no`, `purehelp.no`, `linkedin.com`).
@@ -79,7 +79,11 @@ Automated corporate research frequently suffers from entity confusion, hallucina
 
 - **Exact Company Identity Resolution**: Canonical 9-digit Modulo 11 check digit verification; multi-token Jaccard similarity; legal suffix normalization (`AS`, `ASA`, `ENK`, `NUF`); automated rejection of non-target entities.
 - **Official Financial & Governance Intelligence**: Integrates with Regnskapsregisteret REST endpoints; evaluates filing obligations under *Regnskapsloven*; extracts revenue, operating profit, and total assets.
-- **Evidence-Gated Website Discovery**: Discovers domain candidates via Enhetsregisteret or Brave Search fallback; applies an identity gate verifying organisation number or registered office on home and contact pages; rejects parked or dead domains.
+- **Independent Website Discovery**: Deterministic candidate domain generation (corporate slug variants, Norwegian legal suffix transformations, direct `.no` matching), DNS pre-filtering, and an identity gate requiring explicit organisation number or registered office address/municipality confirmation on candidate home and contact pages before publishing; rejects parked or dead domains.
+- **Social Profile Verification & Quarantining**: Discovers social profile links (LinkedIn, Facebook, Instagram, Twitter/X, YouTube) and subjects each to handle-level correlation against the legal entity name. Identifies and isolates shared website agency/developer and theme vendor handles into dedicated quarantined records (`quarantined_social_{i}`) rather than misattributing them to the company.
+- **Hiring & Job Vacancies Discovery**: Resolves careers landing pages (`careers_page`) and individual job vacancies (`job_vacancy_{i}`) directly from verified corporate domains or first-party applicant tracking systems (e.g., Teamtailor, Webcruiter, Finn, Jobbnorge). Explicitly rejects generic ATS portal frontpages, third-party recruiters, and parent/group vacancies that do not explicitly identify the target legal entity.
+- **Dated News Discovery**: Discovers individual news articles (`news_article_{i}`) mentioning the company, verifying exact legal entity attribution, publisher/platform, publication timestamp (ISO 8601), and factual excerpts. Undated or generic articles without clear entity attribution are quarantined or marked `unsure`/`rejected`.
+- **Three-Tier Source Verdict System**: Evaluates every discovered source (news, vacancy, social, website) with a discrete verdict: `confirmed` (strictly verified exact entity identity, full provenance), `unsure` (plausible or partial entity correlation, undated, or potential group match), or `rejected` (provenance mismatch, generic aggregator, or different legal entity). Only `confirmed` evidence is promoted to published profile facts.
 - **Cryptographic Provenance Engine**: Accompanies every observation with source URLs, ISO 8601 timestamps, SHA-256 hashes, and extracted claim spans.
 - **Change Intelligence**: AST-based semantic normalization; detects material additions, modifications, and deletions across snapshots without false alerts from whitespace or ordering.
 - **Interactive Full-Stack Web Platform**: Production Next.js 16 frontend with instant search, reactive autocomplete, detailed company dossiers, evidence slide-out drawers, and batch run telemetry.
@@ -199,10 +203,43 @@ Every claim emitted by OrgTrace strictly conforms to [`OUTPUT_CONTRACT.md`](OUTP
       "source_url": "http://www.aelektronikk.no/",
       "retrieved_at": "2026-09-24T14:37:02.269875Z",
       "claim_span": "Company-controlled claim layer; not an official registry fact"
+    },
+    "news_article_0": {
+      "field": "news_article_0",
+      "status": "available",
+      "source_type": "news_article",
+      "source_url": "https://e24.no/boers-og-finans/i/Pg7Lmb/mowi-med-rekordhoeye-inntekter-drysser-1-2-mrd-over-aksjonaerene",
+      "title": "Mowi med rekordhøye inntekter – drysser 1,2 mrd. over aksjonærene",
+      "publisher": "E24",
+      "published_at": "2026-11-04T05:32:27Z",
+      "retrieved_at": "2026-11-05T12:00:00Z",
+      "verdict": "confirmed",
+      "verdict_reason": "Exact entity attribution confirmed for MOWI ASA (964118191) with explicit publication date and financial results.",
+      "claim_span": "Oppdrettsgiganten Mowi ASA leverte rekordhøye inntekter..."
+    },
+    "job_vacancy_0": {
+      "field": "job_vacancy_0",
+      "status": "available",
+      "source_type": "job_vacancy",
+      "source_url": "https://careers.remarkable.com/jobs/5211933-senior-frontend-engineer",
+      "title": "Senior Frontend Engineer",
+      "publisher": "Teamtailor (reMarkable)",
+      "retrieved_at": "2026-11-05T12:00:00Z",
+      "verdict": "confirmed",
+      "verdict_reason": "First-party vacancy explicitly attributed to REMARKABLE AS (916340257).",
+      "claim_span": "reMarkable is looking for a Senior Frontend Engineer..."
     }
   }
 }
 ```
+
+### Three-Tier Source Verdict System
+
+Every discovered individual source (news article, vacancy, careers page, or social handle) is evaluated through a strict three-tier verdict model before reaching downstream consumers:
+
+1. **Confirmed (`confirmed`)**: Strict entity identity match. The exact legal name or organisation number is verified directly on the source page, with a valid publication date (for news) or active direct employer posting (for hiring). Only `confirmed` evidence is promoted to published company profile facts.
+2. **Unsure (`unsure`)**: Plausible or partial entity correlation, undated publication, or potential corporate group/umbrella match without definitive legal entity disambiguation. Retained in the Evidence Drawer for full investigator auditability, but never asserted as fact.
+3. **Rejected (`rejected`)**: Explicit entity mismatch, third-party recruitment aggregator, generic ATS portal frontpage, or shared website agency/developer theme handle. Quarantined or rejected with an explicit `verdict_reason`.
 
 ### 4-Tier Source Hierarchy:
 - **Tier 1 (Official Registers)**: Brønnøysundregistrene Enhetsregisteret & Regnskapsregisteret (statutory authority).
@@ -244,13 +281,18 @@ See [`docs/dependencies-and-licenses.md`](docs/dependencies-and-licenses.md) for
 | **Backend API** | FastAPI, Uvicorn (stateless in-memory cache, CORS middleware, security error shields) |
 | **Frontend Application** | Next.js 16 (App Router), React 19, TypeScript, Tailwind CSS |
 | **Cloud Hosting** | **Vercel** (Frontend) & **Railway** (Backend API container) |
-| **Testing & Verification** | Pytest, Unittest (456 unit & integration tests) |
+| **Testing & Verification** | Pytest, Unittest (500 unit & integration tests) |
 
 ---
 
-## 10. Verified Production Benchmark Results
+## 10. Verified Benchmark Results & Freshness Disclosure
 
-Derived directly from an un-mocked execution of the production pipeline on **1,000 real Norwegian companies** (see [`docs/final-benchmark.md`](docs/final-benchmark.md) and [`out/run-report.json`](out/run-report.json)):
+### Benchmark Freshness & Execution Context
+
+> [!NOTE]
+> **Freshness & Scope Disclosure**:
+> - **Historical 1,000-Company Benchmark (September 24, 2026)**: The empirical figures in the table below were measured during the un-mocked full benchmark execution across all 1,000 companies in `entry-companies.jsonl` (audited artifacts: [`docs/final-benchmark.md`](docs/final-benchmark.md) and [`out/run-report.json`](out/run-report.json)). This benchmark established the pipeline's architectural compliance with competition constraints: scale (1,000 profiles), throughput (4.38 profiles/sec), zero silent drops, resource ceilings (1,618 requests vs. 2,000 cap; 228.09s vs. 45 min cap), and zero third-party API costs ($0.00). This historical run predates the recent discovery, hiring, and news recall enhancements developed in response to organiser feedback.
+> - **Verification of Latest Enhancements (November 2026)**: To avoid unbudgeted bulk re-crawling and preserve external service resources, the organiser-feedback improvements (independent domain candidate discovery, website identity gating, social handle matching/quarantining, careers/hiring discovery, dated news discovery, and three-tier verdicts) were verified against the tracked 10-company smoke cohort (`data/smoke-companies.jsonl`, ~18s runtime, 4 requests, $0.00 cost) and the **500 automated regression tests**, rather than an unbudgeted full re-execution of the 1,000-company cohort.
 
 **1,000 company profiles processed — 93 complete, 907 partial, 0 failed.**
 
@@ -263,15 +305,15 @@ Derived directly from an un-mocked execution of the production pipeline on **1,0
 | **Stated Websites in Registry** | **107 websites** | Stated in official snapshot | 10.7% of cohort |
 | **Verified Live Websites** | **93 websites** | Identity-gated live homepages | 86.9% verification rate |
 | **Average Evidence Coverage** | **65.4%** | Measured cross-module coverage | ✅ Grounded across all fields |
-| **Explanation Grounded Rate** | **100.0% (1.000)** | Zero hallucinated assertions | ✅ 100% Evidence Grounded |
+| **Explanation Grounded Rate** | **100.0% (1.000)** | Zero ungrounded assertions on audited cohort | ✅ Evidence Grounded |
 | **Total Wall-Clock Runtime** | **228.09 seconds** (~3m 48s) | ≤ 2,700.0s (45.0 min ceiling) | ✅ **8.4% of budget used** |
 | **Batch Throughput** | **4.38 profiles / second** | Continuous 8-worker execution | High Throughput |
 | **External HTTP Requests** | **1,618 requests** | ≤ 2,000 requests | ✅ **80.9% of budget used** (382 remaining) |
 | **HTTP Request Success Rate** | **99.01%** (1,602 / 1,618) | ≥ 95.0% target | Minimal upstream drops |
 | **Third-Party API Spend** | **$0.0000 USD** | ≤ $10.00 USD cap | ✅ **100% budget preserved** |
-| **Automated Test Suite** | **456 passed, 0 failed** | 100% passing across all stages | ✅ 100% Pass Rate |
+| **Automated Test Suite** | **500 passed, 0 failed** | 100% passing across all stages | ✅ 100% Pass Rate |
 
-*Why 907 Partial Profiles?* In the benchmark universe, ~89.3% of entities (such as holding vehicles, property associations, or asset holding firms) do not operate or register a website. Rather than fabricating websites or reporting false claims, OrgTrace records `not_found` or `not_applicable` with supporting evidence, preserving 100% precision.
+*Why 907 Partial Profiles?* In the benchmark universe, ~89.3% of entities (such as holding vehicles, property associations, or asset holding firms) do not operate or register a website. Rather than fabricating websites or reporting false claims, OrgTrace records `not_found` or `not_applicable` with supporting evidence, preserving high precision and zero ungrounded assertions.
 
 ---
 
@@ -336,9 +378,9 @@ npm run dev
 
 ---
 
-## 12. Competition Reproducibility & Evaluation Guide
+## 13. Competition Reproducibility & Evaluation Guide
 
-### 12.1 Official Submission Identity & Commit Provenance
+### 13.1 Official Submission Identity & Commit Provenance
 
 - **Agent Entry Name**: `OrgTrace`
 - **Builder Name**: `Naman Deep Tripathi`
@@ -348,13 +390,14 @@ npm run dev
 - **Commit History & Provenance**:
   - **Original Frozen Submission Commit**: `559583905e4d3c5f93ac8e6b422b5148bd8cd4c8` (submitted at original challenge freeze)
   - **Pull Request #1 (Recall Discovery v2)**: merged in `674dec2a829b2ad333c74272f55dc2798937c860`
-  - **Evaluator Audit & Verified Clean-Clone Main Commit**: current `main` branch HEAD
+  - **Intermediate Verification & Feedback Commits**: `4d88a86`, `b2cb935`, `295d6ee`, `b7eab99`, `0f3682d`, `5c481e9`, `33ae9ff`, `c29860e`, `d2543a5`
+  - **Final Submission & Documentation HEAD**: Verified clean-clone `main` branch commit (recorded in `MANIFEST.json`)
 
 ---
 
-### 12.2 Verified Key-Free, Public-Source Batch Command
+### 13.2 Verified Key-Free, Public-Source Batch Command
 
-OrgTrace requires **zero API keys**, zero paid credentials, and zero private configuration to run in production. From a fresh clone, run:
+OrgTrace requires **zero API keys**, zero paid credentials, and zero private configuration to run in production across all batch modes (`full`, `smoke`, `eval`). From a fresh clone, run:
 
 ```bash
 git clone https://github.com/namandeeptripathi/OrgTrace.git
@@ -383,7 +426,7 @@ uv run python scripts/run_competition_batch.py \
 
 ---
 
-### 12.3 How to Run the Evaluator on Any Arbitrary Company Cohort
+### 13.3 How to Run the Evaluator on Any Arbitrary Company Cohort
 
 The evaluator can run OrgTrace against any arbitrary JSON or JSONL company list (containing 9-digit `organisation_number` entries):
 
@@ -400,7 +443,7 @@ The evaluator can run OrgTrace against any arbitrary JSON or JSONL company list 
 
 ---
 
-### 12.4 Scope Distinction: Smoke Test vs. Full 1,000-Company Benchmark
+### 13.4 Scope Distinction: Smoke Test vs. Full 1,000-Company Benchmark
 
 | Dimension | Key-Free Smoke Test (`smoke`) | Evaluator Batch (`eval`) | Full Benchmark (`full`) |
 | :--- | :--- | :--- | :--- |
@@ -417,13 +460,13 @@ The evaluator can run OrgTrace against any arbitrary JSON or JSONL company list 
 
 ---
 
-### 12.5 Optional API Keys (Documented Separately)
+### 13.5 Optional API Keys (Documented Separately)
 
 - **`BRAVE_SEARCH_API_KEY` (Optional)**: Used exclusively for secondary search recall when an enterprise lacks a registered website URL in Brønnøysundregistrene. If absent or unset, OrgTrace automatically records deterministically gated `not_found` evidence without error, using 100% public sources. The baseline engine requires **no API keys**.
 
 ---
 
-## 13. Competition Execution Commands
+## 14. Competition Execution Commands
 
 OrgTrace provides a unified, executable runner script [`scripts/run_competition.sh`](scripts/run_competition.sh):
 
@@ -452,7 +495,7 @@ uv run pytest
 
 ---
 
-## 14. Repository Structure
+## 15. Repository Structure
 
 ```
 OrgTrace/
@@ -472,7 +515,7 @@ OrgTrace/
 │   ├── evidence_engine.py             # Immutable Evidence models & SHA-256 provenance
 │   ├── change_intelligence.py         # Semantic normalization & material diffing
 │   ├── batch_engine.py                # 1,000-profile streaming & SharedBudgetTracker
-│   ├── explanations.py                # Zero-hallucination explanation generator
+│   ├── explanations.py                # Grounded explanation generator
 │   ├── url_safety.py                  # SSRF guard & private IP blocking
 │   └── resilience.py                  # Exponential backoff, jitter & circuit safety
 │
@@ -496,7 +539,7 @@ OrgTrace/
 │   ├── run_refresh_replay.py          # Deterministic snapshot replay script
 │   └── generate_manifest.py           # Tool to regenerate MANIFEST.json
 │
-├── tests/                             # Automated test suite (456 tests)
+├── tests/                             # Automated test suite (500 tests)
 │   ├── test_poc.py                    # Core unit and integration tests
 │   ├── test_api.py                    # FastAPI endpoint tests
 │   ├── test_search_enrichment.py      # Recall discovery & search enrichment tests
@@ -511,11 +554,11 @@ OrgTrace/
 
 ---
 
-## 15. Known Limitations & Engineering Tradeoffs
+## 16. Known Limitations & Engineering Tradeoffs
 
 In compliance with competition transparency standards, OrgTrace openly documents known system boundaries (detailed in [`docs/limitations.md`](docs/limitations.md)):
 
-1. **Holding Company & Group Ambiguity**: Holding companies frequently share brand names with operating arms. OrgTrace requires exact evidence correlation before publishing a website. If a shared website only references the operating company, OrgTrace marks the holding company's website as `not_found`, deliberately preferring 100% precision over raw coverage.
+1. **Holding Company & Group Ambiguity**: Holding companies frequently share brand names with operating arms. OrgTrace requires exact evidence correlation before publishing a website. If a shared website only references the operating company, OrgTrace marks the holding company's website as `not_found`, deliberately prioritizing precision and statutory evidence correlation over ungrounded coverage.
 2. **Client-Side Rendering (SPA)**: The lightweight crawler extracts static HTML. Websites rendering content exclusively through heavy client-side JavaScript (e.g., client-rendered React apps without SSR) may yield incomplete text unless escalated to headless browser rendering.
 3. **Statutory Financial Exemptions**: Under *Regnskapsloven § 1-2*, sole proprietorships (*ENK*) and small partnerships are legally exempt from submitting annual accounts. These entities legitimately resolve to `financials: not_applicable`.
 4. **Bulk Snapshot Lag**: `brreg-enheter.csv` represents a frozen snapshot. Companies formed or altered after the snapshot date will show discrepancies with live API queries; OrgTrace reconciles this by recording both snapshot and live timestamps.
@@ -523,7 +566,7 @@ In compliance with competition transparency standards, OrgTrace openly documents
 
 ---
 
-## 16. Future Roadmap
+## 17. Future Roadmap
 
 *The following items represent designated post-competition developments:*
 - **Headless Browser Cluster**: Scaled integration of `scrapy-playwright` for full DOM evaluation of heavy JavaScript single-page applications.
@@ -533,7 +576,7 @@ In compliance with competition transparency standards, OrgTrace openly documents
 
 ---
 
-## 17. Data Licenses & Attribution
+## 18. Data Licenses & Attribution
 
 - **Norwegian Public Data**: Data from Brønnøysundregistrene (Enhetsregisteret and Regnskapsregisteret) is licensed under the Norwegian Licence for Open Government Data ([NLOD 2.0](https://data.norge.no/nlod/no/2.0)).
   - *Statutory Attribution*: *"Inneholder data under Norsk lisens for offentlige data (NLOD) tilgjengeliggjort av Brønnøysundregistrene."*
