@@ -1245,7 +1245,7 @@ class OrganiserReferenceValidationTests(unittest.TestCase):
         self.assertEqual(len(ats_links), 0)
 
     def test_sunnaas_dated_news_article_contract_envelope(self):
-        article_url = "https://www.sunnaas.no/aktuelt/bedre-sosial-funksjon-etter-hjerneskade"
+        article_url = "https://www.sunnaas.no/fag-og-forskning/kompetansesentre-og-tjenester/regional-kompetansetjeneste-for-rehabilitering-rkr/nyheter-rkr/bedre-sosial-funksjon-etter-hjerneskade/"
         profile = {
             "name": "SUNNAAS SYKEHUS HF",
             "organisation_number": "883971752",
@@ -1253,10 +1253,10 @@ class OrganiserReferenceValidationTests(unittest.TestCase):
                 "news_article_1": evidence(
                     "news", "available", "website_news_page", article_url,
                     source_title="Bedre sosial funksjon etter hjerneskade",
-                    published_at="2026-03-15",
+                    published_at="2025-09-22T20:00:00+02:00",
                     publisher="Sunnaas Sykehus",
                     verdict="confirmed",
-                    verdict_reason="Dated article explicitly identifies SUNNAAS SYKEHUS HF with verified publication date 2026-03-15",
+                    verdict_reason="Dated article explicitly identifies SUNNAAS SYKEHUS HF with verified publication date 2025-09-22",
                 ),
                 "undated_news_1": evidence(
                     "news", "available", "website_news_page", "https://www.sunnaas.no/nyheter/arkiv",
@@ -1275,6 +1275,33 @@ class OrganiserReferenceValidationTests(unittest.TestCase):
         self.assertIn("Bedre sosial funksjon etter hjerneskade", news_claim["value"])
         # Undated news must NOT leak into confirmed claim value
         self.assertNotIn("Nyhetsarkiv", news_claim["value"])
+        # Ensure exact organiser URL is retained in evidence
+        ev_rec = next(e for e in envelope["evidence"] if e["id"] == news_claim["evidence_ids"][0])
+        self.assertEqual(ev_rec["source_url"], article_url)
+
+    def test_mowi_asa_dated_news_article_verification(self):
+        mowi_url = "https://e24.no/boers-og-finans/i/Pg7Lmb/mowi-med-rekordhoeye-inntekter-drysser-1-2-mrd-over-aksjonaerene"
+        profile = {
+            "name": "MOWI ASA",
+            "organisation_number": "964118191",
+            "evidence": {
+                "news_article_1": evidence(
+                    "news", "available", "public_news", mowi_url,
+                    source_title="Mowi drysser 1,2 mrd. over aksjonærene – E24",
+                    published_at="2026-11-04T05:32:27Z",
+                    publisher="E24",
+                    verdict="confirmed",
+                    verdict_reason="Dated article on E24 explicitly identifies MOWI ASA with verified publication date 2026-11-04",
+                ),
+            },
+        }
+        unified = build_unified_company_profile(profile)
+        envelope = unified.to_contract_envelope()
+        news_claim = next(c for c in envelope["claims"] if c["field"] == "news_events")
+        self.assertEqual(news_claim["availability"], "available")
+        self.assertIn("Mowi drysser 1,2 mrd. over aksjonærene – E24", news_claim["value"])
+        ev_rec = next(e for e in envelope["evidence"] if e["id"] == news_claim["evidence_ids"][0])
+        self.assertEqual(ev_rec["source_url"], mowi_url)
 
 
 if __name__ == "__main__":

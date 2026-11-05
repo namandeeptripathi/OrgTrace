@@ -108,7 +108,7 @@ case "${MODE}" in
             --max-requests 2000 \
             --max-cost 10.0 \
             --max-runtime 2700.0 \
-            --modules registry,accounting_obligation "$@"
+            --modules registry,accounting_obligation,website "$@"
         echo ""
         echo "SUCCESS: Smoke batch complete. Output: out/smoke-envelopes.jsonl"
         ;;

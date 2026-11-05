@@ -6,7 +6,7 @@
 [![Live Demo: Vercel](https://img.shields.io/badge/Live_Demo-org--trace.vercel.app-000000?style=flat&logo=vercel)](https://org-trace.vercel.app)
 [![Backend API: Railway](https://img.shields.io/badge/API-Railway-0B0D0E?style=flat&logo=railway)](https://orgtrace-production-07b0.up.railway.app)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Tests: 499 Passed](https://img.shields.io/badge/tests-499%20passed-brightgreen.svg)](tests/)
+[![Tests: 500 Passed](https://img.shields.io/badge/tests-500%20passed-brightgreen.svg)](tests/)
 [![Benchmark: 1,000 Profiles](https://img.shields.io/badge/benchmark-1%2C000%20profiles-success.svg)](docs/final-benchmark.md)
 [![Data License: NLOD 2.0](https://img.shields.io/badge/Data_License-NLOD%202.0-blue.svg)](https://data.norge.no/nlod/no/2.0)
 
@@ -438,7 +438,7 @@ OrgTrace provides a unified, executable runner script [`scripts/run_competition.
 # 3. Run Stage 18 Competition Evaluation Harness
 ./scripts/run_competition.sh eval
 
-# 4. Run complete automated test suite (499 tests)
+# 4. Run complete automated test suite (500 tests)
 ./scripts/run_competition.sh test
 # Or directly via pytest:
 uv run pytest
