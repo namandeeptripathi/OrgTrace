@@ -78,7 +78,12 @@ def answer_profile(row: dict[str, Any], question: str) -> dict[str, Any]:
         if value.get("description") and website_publishable:
             facts.append(_claim("Website description", value["description"], website, "company_reported_claim"))
         for item in (value.get("social_links") or []) if website_publishable else []:
-            facts.append(_claim(f"Declared {item['platform']} profile", item["url"], website, "company_linked_social_profile"))
+            from .identity import assess_social_identity
+            soc_assess = assess_social_identity(row, item)
+            if soc_assess.get("publishable"):
+                facts.append(_claim(f"Declared {item['platform']} profile", item["url"], website, "company_linked_social_profile"))
+            else:
+                unsupported.append(f"Candidate social profile {item['url']} quarantined: {soc_assess.get('reason')}")
         if website.get("status") == "available" and not website_publishable:
             unsupported.append("A registry-linked website was fetched, but exact legal-entity identity was not established; its claims and social links are quarantined.")
         if website.get("status") != "available":

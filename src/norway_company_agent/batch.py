@@ -366,6 +366,8 @@ def terminal_envelope(
         "operations": operations,
         "state": entity_state,
         "status": profile_status,
+        "summary": profile.get("summary") or (profile.get("explanations") or {}).get("summary"),
+        "buyer_insight": profile.get("buyer_insight") or (profile.get("explanations") or {}).get("buyer_insight"),
         "started_at": started_at,
         "completed_at": completed_at,
         "modules": module_states,

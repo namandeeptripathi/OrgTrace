@@ -21,6 +21,11 @@ ATS_HOSTS = {
     "bamboohr.com": "BambooHR",
 }
 
+JOB_AGGREGATOR_HOSTS = {
+    "indeed.com", "glassdoor.com", "karrierestart.no", "jooble.org",
+    "rubrikk.no", "jobbdir.no", "talent.com", "monster.no",
+}
+
 SOCIAL_HOSTS = {
     "linkedin.com": "linkedin",
     "facebook.com": "facebook",
@@ -209,6 +214,14 @@ def _ats_rejection_reason(result: dict[str, Any]) -> str:
     host = (parsed.hostname or "").casefold().removeprefix("www.")
     path = parsed.path.casefold().rstrip("/")
     query = parsed.query.casefold()
+
+    # Reject third-party job aggregators and directories
+    if any(host == a or host.endswith("." + a) for a in JOB_AGGREGATOR_HOSTS):
+        return "This is a third-party job aggregator or directory listing, not the direct employer vacancy or careers page"
+
+    if host == "arbeidsplassen.nav.no":
+        if not re.search(r"/stillinger/stilling/[a-f0-9-]+", path):
+            return "This is a generic NAV job search portal or listing index, not an individual verified vacancy"
 
     for domain in ATS_HOSTS:
         if host == domain or host == "www." + domain:
@@ -511,11 +524,19 @@ def extract_search_enrichment(profile: dict[str, Any], results: list[dict[str, A
                 seen_hiring.add(url)
                 active = any(term in path_text for term in ACTIVE_HIRING_TERMS)
                 publisher = platform or host
+                job_published_at = _parse_date(
+                    result.get("published_at") or result.get("page_age") or title or snippet,
+                    retrieved_at=retrieved_at,
+                    text_context=haystack,
+                )
                 hiring_candidates.append({
                     "url": url,
                     "title": title,
+                    "employer": str(profile.get("name") or ""),
                     "platform": platform or None,
                     "publisher": publisher,
+                    "published_at": job_published_at,
+                    "date": job_published_at,
                     "hiring_active": True if active else None,
                     "source": "public_search",
                     "source_url": url,

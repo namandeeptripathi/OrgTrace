@@ -115,6 +115,43 @@ export default async function CompanyPage({ params }: PageProps) {
         </div>
       </div>
 
+      {/* ─── Commercial Buyer Insight ─── */}
+      {(profile.buyer_insight || profile.summary) && (
+        <div
+          className="glass-card"
+          style={{
+            padding: "20px 24px",
+            marginBottom: "28px",
+            borderLeft: "4px solid var(--accent-blue, #3b82f6)",
+            background: "linear-gradient(135deg, rgba(59, 130, 246, 0.06) 0%, rgba(15, 23, 42, 0.5) 100%)",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: "10px", marginBottom: "8px" }}>
+            <span className="badge badge-blue" style={{ fontSize: "0.75rem", textTransform: "uppercase", letterSpacing: "0.05em" }}>
+              Buyer Insight
+            </span>
+            {profile.buyer_insight?.is_fallback && (
+              <span className="badge badge-neutral" style={{ fontSize: "0.75rem" }}>
+                Notice: Statutory baseline only
+              </span>
+            )}
+          </div>
+          <p style={{ fontSize: "1.05rem", fontWeight: 600, color: "var(--text-primary)", marginBottom: "6px", lineHeight: 1.4 }}>
+            {profile.buyer_insight?.headline || profile.summary}
+          </p>
+          {profile.buyer_insight?.why_it_matters && (
+            <p className="text-body" style={{ fontSize: "0.875rem", color: "var(--text-secondary)", marginBottom: "8px" }}>
+              <strong>Commercial Significance:</strong> {profile.buyer_insight.why_it_matters}
+            </p>
+          )}
+          {profile.buyer_insight?.source && (
+            <div className="text-caption" style={{ color: "var(--text-muted, #94a3b8)", fontSize: "0.8rem" }}>
+              Source: {profile.buyer_insight.source}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ─── Key Info Cards ─── */}
       <div
         style={{

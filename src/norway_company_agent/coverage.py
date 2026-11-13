@@ -1616,18 +1616,47 @@ def build_unified_company_profile(
                     })
     careers_field = extracted_profile.careers if extracted_profile else None
 
-    social_urls = []
+    from .identity import assess_social_identity
+
+    raw_candidate_social_urls = []
     if social_rec.get("status") == "available":
-        social_urls = [item.get("url") for item in (social_rec.get("value") or []) if isinstance(item, dict) and item.get("url")]
-    if not social_urls:
+        raw_candidate_social_urls.extend(
+            item.get("url") for item in (social_rec.get("value") or [])
+            if isinstance(item, dict) and item.get("url")
+        )
+    if not raw_candidate_social_urls:
         for k, v in evidence_dict.items():
             if k.startswith("social_profile_") and isinstance(v, dict):
                 u = v.get("source_url")
-                if u and u not in social_urls:
-                    social_urls.append(u)
-    if not social_urls and norm_website:
+                if u and u not in raw_candidate_social_urls:
+                    raw_candidate_social_urls.append(u)
+    if not raw_candidate_social_urls and norm_website:
         website_value = website_rec.get("value") or {}
-        social_urls = [item.get("url") for item in (website_value.get("social_links") or []) if isinstance(item, dict) and item.get("url")]
+        raw_candidate_social_urls.extend(
+            item.get("url") for item in (website_value.get("social_links") or [])
+            if isinstance(item, dict) and item.get("url")
+        )
+
+    # Enforce strict entity ownership on social candidates
+    reg_data = profile.get("registry") or {}
+    entity_eval_meta = {
+        "name": company_name or profile.get("name") or reg_data.get("navn"),
+        "organisation_number": org_number,
+        "overordnetEnhet": profile.get("overordnetEnhet") or reg_data.get("overordnetEnhet"),
+    }
+    social_urls = []
+    quarantined_social = []
+    for cand_url in raw_candidate_social_urls:
+        soc_assess = assess_social_identity(entity_eval_meta, {"url": cand_url})
+        if soc_assess.get("publishable"):
+            if cand_url not in social_urls:
+                social_urls.append(cand_url)
+        else:
+            quarantined_social.append({
+                "url": cand_url,
+                "reason": soc_assess.get("reason", "Social identity not confirmed"),
+                "rejection_category": soc_assess.get("rejection_category", "identity_rejected"),
+            })
 
     # Ingest verified hiring / ATS career channels into social/digital presence
     hiring_urls = [h.get("url") for h in hiring_candidates if isinstance(h, dict) and h.get("url")]

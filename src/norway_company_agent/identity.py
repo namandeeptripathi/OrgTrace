@@ -36,6 +36,40 @@ LEGAL_AND_GENERIC = {
     "nuf", "ab", "b", "v", "limited", "ltd", "inc", "plc", "the", "og", "and",
 }
 
+VENDOR_PLATFORM_HANDLES = {
+    "squarespace", "wix", "wordpress", "shopify", "webflow", "weebly",
+    "hubspot", "ghost", "drupal", "joomla", "prestashop", "magento",
+    "bigcommerce", "strapi", "contentful", "carrd", "automattic",
+    "wpengine", "mailchimp", "klaviyo", "zendesk", "intercom", "github",
+    "bitbucket", "gitlab", "vercel", "netlify", "medium", "substack",
+    "google", "apple", "microsoft",
+}
+
+VENDOR_AGENCY_KEYWORDS = {
+    "webdesign", "webbyraa", "nettbyraa", "designbyraa", "digitalbyraa",
+    "reklamebyraa", "webutvikling", "mediabyraa", "kommunikasjonsbyraa",
+    "designbureau", "adagency", "creativeagency", "theme", "template",
+    "webdesignbureauet", "nettside", "utviklet",
+}
+
+GENERIC_INDUSTRY_TERMS = {
+    "design", "media", "consulting", "solutions", "gruppe", "gruppen", "group",
+    "holding", "holdings", "invest", "investment", "service", "services",
+    "drift", "eiendom", "bygg", "transport", "handel", "teknologi", "technology",
+    "consult", "advokat", "studio", "consultants", "partners", "partner",
+    "management", "international",
+}
+
+GEOGRAPHIC_DISCRIMINATORS = {
+    "norway", "norge", "nordic", "scandinavia", "oslo", "bergen", "stavanger",
+    "trondheim", "tromso",
+}
+
+GENERIC_NAME_STOPWORDS = GENERIC_INDUSTRY_TERMS | {
+    "as", "asa", "ans", "da", "enk", "sa", "nuf", "sti", "iks", "ba",
+}
+
+
 
 def _tokens(value: Any) -> list[str]:
     text = str(value or "").translate(str.maketrans({"ø": "o", "Ø": "O", "å": "a", "Å": "A", "æ": "ae", "Æ": "AE"}))
@@ -209,32 +243,126 @@ def assess_website_identity(profile: dict[str, Any]) -> dict[str, Any]:
 
 
 def assess_social_identity(profile: dict[str, Any], link: dict[str, str]) -> dict[str, Any]:
-    core = _tokens(profile.get("name"))
-    parsed = urllib.parse.urlparse(link.get("url") or "")
-    handle_text = urllib.parse.unquote(parsed.path)
+    url = link.get("url") or ""
+    parsed = urllib.parse.urlparse(url)
+    path = urllib.parse.unquote(parsed.path)
+    clean_parts = [p.casefold().strip() for p in path.split("/") if p.strip()]
+    handle_text = clean_parts[-1] if clean_parts else ""
     handle_compact = "".join(_tokens(handle_text))
-    matched = [token for token in core if token in handle_compact]
+    full_path_tokens = set(_tokens(path))
+
+    # 1. Reject vendor platform root profiles, CMS tools, site builders, and web agencies
+    is_vendor = any(part in VENDOR_PLATFORM_HANDLES for part in clean_parts)
+    is_agency = any(
+        kw in part or any(kw in tok for tok in full_path_tokens)
+        for part in clean_parts
+        for kw in VENDOR_AGENCY_KEYWORDS
+    )
+    is_admin = any(part in {"mycompany", "verification", "admin", "login", "sharer", "share", "intent", "plugins", "dialog"} for part in clean_parts)
+
+    if is_vendor or is_agency or is_admin:
+        vendor_match = next((part for part in clean_parts if part in VENDOR_PLATFORM_HANDLES), None) or "vendor_or_agency"
+        return {
+            **link,
+            "identity_score": 0.0,
+            "publishable": False,
+            "matched_tokens": [],
+            "rejection_category": "vendor_or_agency_handle",
+            "reason": f"Vendor, CMS, hosting, agency, or theme handle '{vendor_match}' is not owned by target company",
+            "method": "deterministic_exact_entity_ownership_v1",
+        }
+
+    # 2. Check for exact organisation number in handle or URL query
+    org_digits = re.sub(r"\D", "", str(profile.get("organisation_number") or ""))
+    found_orgs = [o for o in re.findall(r"\b\d{9}\b", url) if is_valid_org_mod11(o)]
+    parent_org = canonicalize_org_number(profile.get("overordnetEnhet") or profile.get("parent_organisation"))
+
+    if found_orgs:
+        if org_digits and org_digits in found_orgs:
+            return {
+                **link,
+                "identity_score": 1.0,
+                "publishable": True,
+                "matched_tokens": [org_digits],
+                "reason": "Exact organisation number appears in social URL",
+                "method": "deterministic_exact_entity_ownership_v1",
+            }
+        elif parent_org and parent_org in found_orgs:
+            return {
+                **link,
+                "identity_score": 0.2,
+                "publishable": False,
+                "matched_tokens": [],
+                "rejection_category": "parent_attribution",
+                "reason": f"parent_attribution: Social URL cites parent organisation number {parent_org}, not subsidiary {org_digits}",
+                "method": "deterministic_exact_entity_ownership_v1",
+            }
+        else:
+            return {
+                **link,
+                "identity_score": 0.0,
+                "publishable": False,
+                "matched_tokens": [],
+                "rejection_category": "wrong_company_attribution",
+                "reason": f"wrong_company_attribution: Social URL cites conflicting organisation number {found_orgs[0]}",
+                "method": "deterministic_exact_entity_ownership_v1",
+            }
+
+    # 3. Check exact legal name tokens
+    core = _tokens(profile.get("name"))
+    distinctive = [t for t in core if t not in GENERIC_NAME_STOPWORDS and len(t) >= 3]
     core_compact = "".join(core)
-    ratio = len(set(matched)) / len(set(core)) if core else 0.0
+    matched = [token for token in core if token in handle_compact]
+    matched_distinctive = [token for token in distinctive if token in handle_compact]
+
+    # Non-negotiable: Parent/group profiles must not be attributed to subsidiaries
+    geo_in_name = set(core).intersection(GEOGRAPHIC_DISCRIMINATORS)
+    if geo_in_name and not any(g in handle_compact for g in geo_in_name):
+        return {
+            **link,
+            "identity_score": 0.2,
+            "publishable": False,
+            "matched_tokens": matched,
+            "rejection_category": "parent_attribution",
+            "reason": f"parent_attribution: Social URL handle '{handle_text}' lacks entity geographic identifier ({', '.join(sorted(geo_in_name))}) distinguishing the Norwegian subsidiary from parent brand",
+            "method": "deterministic_exact_entity_ownership_v1",
+        }
+
+    # Non-negotiable: Do NOT broadly accept name substring matches
+    # A handle must contain the distinctive entity token(s), not merely generic words like 'design' or 'as'
     if core_compact and core_compact in handle_compact:
         score = 0.98
+        publishable = True
         reason = "normalized legal-name sequence appears in the social handle"
-    elif len(core) == 1 and matched:
+    elif distinctive and len(set(matched_distinctive)) == len(set(distinctive)):
         score = 0.95
+        publishable = True
+        reason = "all distinctive legal-name tokens appear in the social handle"
+    elif len(distinctive) == 1 and matched_distinctive and (len(distinctive[0]) >= 4 or handle_compact == distinctive[0]):
+        score = 0.92
+        publishable = True
         reason = "single distinctive legal-name token appears in the social handle"
-    elif ratio >= 0.75 and len(set(matched)) >= 2:
-        score = 0.9
-        reason = "most legal-name tokens appear in the social handle"
+    elif len(distinctive) >= 2 and len(set(matched_distinctive)) >= 2 and len(set(matched_distinctive)) / len(set(distinctive)) >= 0.75:
+        score = 0.90
+        publishable = True
+        reason = "most distinctive legal-name tokens appear in the social handle"
     else:
-        score = 0.3
-        reason = "social handle lacks strong exact-entity name evidence"
+        score = 0.2
+        publishable = False
+        if not distinctive:
+            reason = "company legal name consists solely of generic terms; independent organisation number is required to claim social handle"
+        elif not matched_distinctive:
+            reason = f"social handle '{handle_text}' lacks distinctive name tokens for '{profile.get('name')}'"
+        else:
+            reason = "social handle lacks sufficient exact-entity distinctive token coverage"
+
     return {
         **link,
         "identity_score": score,
-        "publishable": score >= 0.9,
+        "publishable": publishable,
         "matched_tokens": matched,
         "reason": reason,
-        "method": "deterministic_social_handle_identity_v1",
+        "method": "deterministic_exact_entity_ownership_v1",
     }
 
 
@@ -254,6 +382,11 @@ def apply_website_identity_gate(profile: dict[str, Any], website: dict[str, Any]
         {"platform": item["platform"], "url": item["url"]}
         for item in social_assessments
         if assessment["publishable"] and item["publishable"]
+    ]
+    value["quarantined_social_links"] = [
+        {"platform": item["platform"], "url": item["url"], "reason": item.get("reason", "Identity rejected")}
+        for item in social_assessments
+        if not (assessment["publishable"] and item["publishable"])
     ]
     website["value"] = value
     if not assessment.get("publishable"):

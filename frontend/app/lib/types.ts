@@ -130,6 +130,15 @@ export interface CompanyProfile {
   run_metrics: RunMetrics;
   change_intelligence: ChangeIntelligence;
   explanations: Explanations;
+  summary?: string;
+  buyer_insight?: {
+    headline?: string;
+    why_it_matters?: string;
+    source?: string;
+    source_url?: string;
+    is_fallback?: boolean;
+    category?: string;
+  };
   status: ProfileStatus;
 }
 

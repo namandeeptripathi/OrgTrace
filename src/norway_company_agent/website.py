@@ -231,6 +231,8 @@ def _robots_allowed(url: str, timeout: float, parser: urllib.robotparser.RobotFi
 
 
 def _social_links(base_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
+    from .identity import VENDOR_PLATFORM_HANDLES, VENDOR_AGENCY_KEYWORDS
+
     found: dict[tuple[str, str], dict[str, str]] = {}
     candidates = [str(node.get("href") or "") for node in soup.select("a[href]")]
     candidates.extend(str(node.get("data-href") or "") for node in soup.select("[data-href]"))
@@ -245,11 +247,20 @@ def _social_links(base_url: str, soup: BeautifulSoup) -> list[dict[str, str]]:
         normalized = normalize_social_url(url)
         if not normalized:
             continue
+        # Filter out CMS vendors, web agencies, and admin paths from first-party candidate scraping
+        path_parts = [p.casefold() for p in urllib.parse.urlparse(normalized["url"]).path.split("/") if p]
+        handle = path_parts[-1] if path_parts else ""
+        if handle in VENDOR_PLATFORM_HANDLES or any(p in VENDOR_PLATFORM_HANDLES for p in path_parts):
+            continue
+        if any(kw in handle for kw in VENDOR_AGENCY_KEYWORDS) or any(kw in p for p in path_parts for kw in VENDOR_AGENCY_KEYWORDS):
+            continue
         found[(normalized["platform"], normalized["url"])] = normalized
     return sorted(found.values(), key=lambda item: (item["platform"], item["url"]))
 
 
 def structured_social_links(value: Any) -> list[dict[str, str]]:
+    from .identity import VENDOR_PLATFORM_HANDLES, VENDOR_AGENCY_KEYWORDS
+
     found: dict[tuple[str, str], dict[str, str]] = {}
 
     def walk(node: Any) -> None:
@@ -261,6 +272,12 @@ def structured_social_links(value: Any) -> list[dict[str, str]]:
                     continue
                 normalized = normalize_social_url(raw.strip())
                 if normalized:
+                    path_parts = [p.casefold() for p in urllib.parse.urlparse(normalized["url"]).path.split("/") if p]
+                    handle = path_parts[-1] if path_parts else ""
+                    if handle in VENDOR_PLATFORM_HANDLES or any(p in VENDOR_PLATFORM_HANDLES for p in path_parts):
+                        continue
+                    if any(kw in handle for kw in VENDOR_AGENCY_KEYWORDS) or any(kw in p for p in path_parts for kw in VENDOR_AGENCY_KEYWORDS):
+                        continue
                     found[(normalized["platform"], normalized["url"])] = normalized
             for child in node.values():
                 walk(child)

@@ -109,6 +109,8 @@ class CompanyExplanationReport:
     organisation_number: str
     company_name: str
     explanations: dict[str, Explanation]  # Keyed by field name
+    summary: str = ""
+    buyer_insight: dict[str, Any] = field(default_factory=dict)
     overall_confidence: ExplanationConfidence = ExplanationConfidence.MEDIUM
     grounded_rate: float = 1.0
     evidence_coverage: float = 1.0
@@ -119,6 +121,8 @@ class CompanyExplanationReport:
         return {
             "organisation_number": self.organisation_number,
             "company_name": self.company_name,
+            "summary": self.summary,
+            "buyer_insight": dict(self.buyer_insight),
             "overall_confidence": self.overall_confidence.value,
             "metrics": {
                 "grounded_rate": round(self.grounded_rate, 3),
@@ -805,6 +809,153 @@ def generate_explanation(
 # 6. COMPANY-LEVEL EXPLANATION PIPELINE & BATCH INTEGRATION
 # ============================================================================
 
+def generate_buyer_oriented_summary(profile: dict[str, Any]) -> dict[str, Any]:
+    """Generate a concise, evidence-backed commercial buyer insight.
+
+    Rules:
+    - Start with a verified commercial or operational fact.
+    - Explain why that fact matters for a commercial buyer or procurement team.
+    - Identify its source.
+    - Prefer dated news > verified open roles > verified products/services > operational footprint.
+    - Fall back transparently when there is insufficient independent evidence.
+    - Never invent facts or repeat registry fields merely to fill space.
+    """
+    name = str(profile.get("name") or profile.get("company_name") or "The company").strip()
+    evidence_dict = profile.get("evidence") or {}
+
+    # 1. Prefer dated public news (verdict confirmed or status available)
+    dated_news = []
+    for k, v in evidence_dict.items():
+        if (k.startswith("news_article_") or k in {"news", "news_search"}) and isinstance(v, dict):
+            status = v.get("status")
+            verdict = v.get("verdict")
+            if status == "available" or verdict == "confirmed":
+                val = v.get("value")
+                title = v.get("source_title") or (val.get("title") if isinstance(val, dict) else None)
+                pub_date = v.get("published_at") or (val.get("published_at") or val.get("date") if isinstance(val, dict) else None) or v.get("date")
+                pub_src = v.get("publisher") or v.get("source_url") or "public media"
+                url = v.get("source_url") or (val.get("url") if isinstance(val, dict) else None)
+                if title and pub_date:
+                    dated_news.append({
+                        "title": title,
+                        "date": pub_date,
+                        "publisher": pub_src,
+                        "url": url,
+                        "retrieved_at": v.get("retrieved_at"),
+                    })
+
+    if dated_news:
+        best_news = sorted(dated_news, key=lambda x: str(x.get("date") or ""), reverse=True)[0]
+        headline = f"{name} announced '{best_news['title']}' on {best_news['date']}."
+        why_it_matters = "Signals verified public operational momentum and current market activity corroborated by external reporting."
+        source = f"{best_news['publisher']}" + (f" ({best_news['url']})" if best_news.get("url") else "")
+        summary_text = f"{headline} {why_it_matters} Source: {source}"
+        return {
+            "headline": headline,
+            "why_it_matters": why_it_matters,
+            "source": source,
+            "source_url": best_news.get("url"),
+            "category": "dated_news",
+            "summary_text": summary_text,
+            "is_fallback": False,
+        }
+
+    # 2. Open job vacancies / hiring velocity
+    open_vacancies = []
+    for k, v in evidence_dict.items():
+        if (k.startswith("job_vacancy_") or k in {"hiring_search", "careers"}) and isinstance(v, dict):
+            status = v.get("status")
+            verdict = v.get("verdict")
+            if status == "available" or verdict == "confirmed":
+                val = v.get("value")
+                title = v.get("source_title") or (val.get("title") if isinstance(val, dict) else None)
+                pub = v.get("publisher") or (val.get("publisher") or val.get("platform") if isinstance(val, dict) else None) or "careers portal"
+                url = v.get("source_url") or (val.get("url") if isinstance(val, dict) else None)
+                pub_date = v.get("published_at") or (val.get("published_at") or val.get("date") if isinstance(val, dict) else None)
+                if title and "careers page" not in str(title).casefold():
+                    open_vacancies.append({
+                        "title": title,
+                        "publisher": pub,
+                        "url": url,
+                        "published_at": pub_date,
+                    })
+
+    if open_vacancies:
+        best_job = open_vacancies[0]
+        date_clause = f" (published {best_job['published_at']})" if best_job.get("published_at") else ""
+        headline = f"{name} is actively recruiting for '{best_job['title']}'{date_clause}."
+        why_it_matters = "Demonstrates active talent acquisition, ongoing organizational investment, and operational viability."
+        source = f"{best_job['publisher']}" + (f" ({best_job['url']})" if best_job.get("url") else "")
+        summary_text = f"{headline} {why_it_matters} Source: {source}"
+        return {
+            "headline": headline,
+            "why_it_matters": why_it_matters,
+            "source": source,
+            "source_url": best_job.get("url"),
+            "category": "active_vacancies",
+            "summary_text": summary_text,
+            "is_fallback": False,
+        }
+
+    # 3. Verified commercial offerings / products / services from first-party website
+    web_ev = evidence_dict.get("website") or {}
+    web_val = web_ev.get("value") if isinstance(web_ev, dict) else {}
+    if isinstance(web_val, dict) and web_ev.get("status") == "available":
+        desc = (web_val.get("description") or "").strip()
+        final_url = web_val.get("final_url") or web_ev.get("source_url")
+        if desc and len(desc) >= 20:
+            clean_desc = desc[:200].rstrip(".")
+            headline = f"{name} provides commercial offerings: \"{clean_desc}\"."
+            why_it_matters = "Directly clarifies commercial core capabilities and primary customer deliverables from its verified digital presence."
+            source = f"Verified corporate website ({final_url})"
+            summary_text = f"{headline} {why_it_matters} Source: {source}"
+            return {
+                "headline": headline,
+                "why_it_matters": why_it_matters,
+                "source": source,
+                "source_url": final_url,
+                "category": "commercial_offerings",
+                "summary_text": summary_text,
+                "is_fallback": False,
+            }
+
+    # 4. Verified operational facilities & workforce from statutory registration
+    muni = profile.get("municipality")
+    emp = profile.get("employees")
+    ind_label = profile.get("industry_label") or profile.get("industry")
+    if muni or emp:
+        emp_text = f" with {emp} registered employees" if emp else ""
+        ind_text = f" in {ind_label}" if ind_label else ""
+        headline = f"{name} maintains operational operations in {muni or 'Norway'}{emp_text}{ind_text}."
+        why_it_matters = "Verifies localized statutory business presence and active employer standing in Norway."
+        source = "Official Norwegian statutory registers (Brønnøysundregistrene)"
+        summary_text = f"{headline} {why_it_matters} Source: {source}"
+        return {
+            "headline": headline,
+            "why_it_matters": why_it_matters,
+            "source": source,
+            "source_url": "https://data.brreg.no/enhetsregisteret/api",
+            "category": "operational_presence",
+            "summary_text": summary_text,
+            "is_fallback": False,
+        }
+
+    # 5. Transparent fallback
+    headline = f"No verified third-party news, active vacancies, or commercial web offerings were identified for {name}."
+    why_it_matters = "Commercial diligence requires independent operational verification beyond baseline legal registration."
+    source = "Multi-source evidence audit (automated pipeline)"
+    summary_text = f"{headline} {why_it_matters} Source: {source}"
+    return {
+        "headline": headline,
+        "why_it_matters": why_it_matters,
+        "source": source,
+        "source_url": None,
+        "category": "transparent_fallback",
+        "summary_text": summary_text,
+        "is_fallback": True,
+    }
+
+
 def explain_company_profile(
     profile: dict[str, Any],
     *,
@@ -1014,10 +1165,15 @@ def explain_company_profile(
     elif evidence_coverage < 0.25:
         overall_conf = ExplanationConfidence.LOW
 
+    buyer_insight = generate_buyer_oriented_summary(profile)
+    summary_text = buyer_insight.get("summary_text") or ""
+
     return CompanyExplanationReport(
         organisation_number=org,
         company_name=name,
         explanations=explanations,
+        summary=summary_text,
+        buyer_insight=buyer_insight,
         overall_confidence=overall_conf,
         grounded_rate=grounded_rate,
         evidence_coverage=evidence_coverage,

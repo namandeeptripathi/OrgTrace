@@ -405,6 +405,7 @@ def main() -> None:
                                     value=job,
                                     source_title=job.get("title"),
                                     publisher=job.get("platform") or job.get("publisher"),
+                                    published_at=job.get("published_at") or job.get("date"),
                                     retrieved_at=job.get("retrieved_at") or utc_now(),
                                     organisation_number=profile["organisation_number"],
                                     company_name=profile.get("name"),
@@ -780,7 +781,7 @@ def main() -> None:
                     key = f"quarantined_social_{quarantine_soc_idx}"
                     if key not in profile["evidence"]:
                         profile["evidence"][key] = evidence(
-                            "social_presence", "available", "quarantined_social_media_link",
+                            "social_presence", "not_found", "quarantined_social_media_link",
                             soc_url,
                             value=assessment,
                             source_title=soc_platform,
@@ -789,16 +790,21 @@ def main() -> None:
                             organisation_number=profile["organisation_number"],
                             company_name=profile.get("name"),
                             identity_match=False,
-                            confidence=assessment.get("identity_score", 0.3),
+                            confidence=assessment.get("identity_score", 0.0),
                             verdict="rejected",
                             verdict_reason=assessment.get("reason") or "Social link failed identity verification; web agency or theme link quarantined",
+                            note=assessment.get("reason") or "Quarantined non-entity social link",
                         )
 
-            # Sync social links from website evidence if not already set
-            if not profile.get("social_presence"):
-                if website_val.get("social_links"):
-                    profile["social_presence"] = website_val["social_links"]
-                    profile["social_links"] = website_val["social_links"]
+            # Sync confirmed social links from website evidence if present
+            confirmed_social = [
+                {"platform": a.get("platform"), "url": a.get("url")}
+                for a in social_assessments
+                if a.get("publishable")
+            ]
+            if confirmed_social:
+                profile["social_presence"] = confirmed_social
+                profile["social_links"] = confirmed_social
 
             actual_official_requests = sum(1 for item in metrics if item.status > 0)
             metric = {
@@ -890,8 +896,12 @@ def main() -> None:
             exp_report = explain_company_profile(profile)
             explanation_reports.append(exp_report.to_dict())
             profile["explanations"] = exp_report.to_dict()
+            profile["summary"] = exp_report.summary
+            profile["buyer_insight"] = exp_report.buyer_insight
         except Exception as exc:
             profile["explanations"] = {"summary": "Explanation generation failed", "error": str(exc), "metrics": {"grounded_rate": 1.0, "evidence_coverage": 0.0}}
+            profile["summary"] = "Explanation generation failed"
+            profile["buyer_insight"] = {"is_fallback": True}
 
     if args.explanations_output:
         Path(args.explanations_output).parent.mkdir(parents=True, exist_ok=True)
